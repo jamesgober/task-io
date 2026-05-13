@@ -1,0 +1,47 @@
+[package]
+name = "task-io"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+readme = "README.md"
+license = "Apache-2.0"
+
+authors = [
+    "James Gober <me@jamesgober.com>"
+]
+
+description = "Distributed task scheduling and dispatch pipeline for Rust. Tasks flow across nodes with delivery guarantees, retries, priority lanes, dead-letter handling, and back-pressure. The enterprise companion to in-process schedulers like task-forge."
+
+keywords = [
+    "task",
+    "scheduler",
+    "queue",
+    "distributed",
+    "io"
+]
+
+categories = [
+    "concurrency",
+    "network-programming",
+    "asynchronous"
+]
+
+documentation = "https://docs.rs/task-io"
+repository    = "https://github.com/jamesgober/task-io"
+homepage      = "https://github.com/jamesgober/task-io"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+
+[dev-dependencies]
+
+[features]
+default = ["std"]
+std = []
+
+[profile.release]
+opt-level = 3
+lto = "thin"
