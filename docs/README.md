@@ -4,10 +4,11 @@ Reference documentation for the `task-io` crate.
 
 ## Sections
 
-- [API Reference](./API.md): every public item, with examples.
+- [API Reference](./API.md): every public item, with examples (draft for the 0.2.0 design lock).
+- [Architecture](./ARCHITECTURE.md): how task-io is built inside (draft for the 0.2.0 design lock).
 - [Release notes](./release/): one file per release.
 
-Added as the crate grows: `ARCHITECTURE.md` (0.2.0), `PERFORMANCE.md` and `PLATFORM-NOTES.md` (0.3.0), `STABILITY-1.0.md` (0.9.0).
+Added as the crate grows: `PERFORMANCE.md` and `PLATFORM-NOTES.md` (0.3.0), `STABILITY-1.0.md` (0.9.0).
 
 ## Status
 

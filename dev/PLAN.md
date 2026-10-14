@@ -539,8 +539,8 @@ These are James's calls. Each is written so it can be answered with one line.
 | O-5 | ~~Durable store through store-io or an internal log?~~ Decided 2026-10-14: task-io's own durable log store, store-io as an optional adapter (D-018). | |
 | O-6 | Reference hardware for the gates is this machine (Windows) and its WSL2 Ubuntu. Add a bare-metal Linux box and a Mac when available? | yes when available; until then Windows and WSL2 gate, macOS is reported only |
 | O-7 | Name of the main type: `Pool`? | `Pool` |
-| O-9 | `background-jobs` (a listed competitor) is AGPL-3.0. Add it as a dependency of the `compare/` harness in this MIT/Apache repository, benchmark it from a separate private harness, or drop it from the competitor set? | benchmark it from a separate, private harness that is never published, so no AGPL code enters this repository's dependency graph; the competitor set is never shrunk otherwise |
 | O-8 | Names of the adapter crates. Cluster: answered 2026-10-14, `task-io-cluster` (D-021). Encryption and store-io: still open. | `task-io-crypt` (names what it plugs in, `crypt-io`), `task-io-store-io` (task-io already has its own stores, so `task-io-store` would mislead) |
+| O-9 | `background-jobs` (a listed competitor) is AGPL-3.0. Add it as a dependency of the `compare/` harness in this MIT/Apache repository, benchmark it from a separate private harness, or drop it from the competitor set? | benchmark it from a separate, private harness that is never published, so no AGPL code enters this repository's dependency graph; the competitor set is never shrunk otherwise |
 
 ---
 
