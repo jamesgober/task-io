@@ -6,7 +6,9 @@
 
 mod alloc;
 mod contenders;
+mod cronjobs;
 mod delayed;
+mod durable;
 mod jobs;
 mod proto;
 mod report;
@@ -97,6 +99,8 @@ fn main() {
             "W-12" => w12(&o, &mut report),
             "W-13" => w13(&o, &mut report),
             "D-01" => d01(&o, &mut report),
+            "D-02" => d02(&o, &mut report),
+            "P-01" => p01(&o, &mut report),
             other => eprintln!("unknown suite {other}"),
         }
     }
@@ -790,5 +794,61 @@ fn d01(o: &Opts, r: &mut Report) {
             .map(|_| delayed::d01_tokio(w, n, window))
             .collect();
         rows(r, "tokio-timer", res);
+    }
+}
+
+fn p01(o: &Opts, r: &mut Report) {
+    let (target, time_box, runs) = if o.quick {
+        (5_000u64, Duration::from_secs(10), 1)
+    } else {
+        (1_000_000u64, Duration::from_secs(120), 3)
+    };
+    let dir = std::env::temp_dir().join("task-io-compare-p01");
+    let _ = std::fs::create_dir_all(&dir);
+    if !o.wants("apalis-sqlite") {
+        return;
+    }
+    for subs in [1usize, 32] {
+        for (sync, name) in [
+            (durable::Sync::Full, "apalis-sqlite"),
+            (durable::Sync::ApalisDefault, "apalis-sqlite (default, synchronous=OFF: not power-safe)"),
+        ] {
+            let res: Vec<_> = (0..runs).map(|_| durable::p01_apalis(&dir, sync, subs, target, time_box)).collect();
+            let n = res.iter().map(|x| x.submits).min().unwrap_or(0);
+            let v = format!("durable submits, 64-byte payload, {subs} submitter(s), up to {target} or {} s (measured {n})", time_box.as_secs());
+            let rate: Vec<f64> = res.iter().map(|x| x.per_second).collect();
+            r.push(Row::summary("P-01", v.clone(), name, subs, "submits per second", "/s", true, &rate));
+            let hs: Vec<_> = res.into_iter().map(|x| x.latency).collect();
+            let mut row = Row::latency("P-01", v, name, subs, &hs);
+            row.metric = "submit-to-durable latency".into();
+            r.push(row);
+        }
+    }
+}
+
+fn d02(o: &Opts, r: &mut Report) {
+    // Full protocol: 10,000 schedules firing every minute for 10 minutes.
+    // Quick: 1,000 every second for 10 seconds.
+    let (n, period, run_for, label) = if o.quick {
+        (1_000, cronjobs::Period::Second, Duration::from_secs(10), "every second for 10 s")
+    } else {
+        (10_000, cronjobs::Period::Minute, Duration::from_secs(600), "every minute for 10 min")
+    };
+    let v = format!("{n} cron schedules, {label}");
+    let mut rows = |r: &mut Report, name: &'static str, res: cronjobs::CronResult| {
+        r.push(Row::single("D-02", v.clone(), name, 0, &format!("ticks fired (expected {})", res.expected), "", res.fired as f64));
+        match res.cpu_ms {
+            Some(c) => r.push(Row::single("D-02", v.clone(), name, 0, "CPU time over the run", "ms", c)),
+            None => r.push(Row::missing("D-02", v.clone(), name, 0, "CPU time over the run")),
+        }
+        let mut row = Row::latency("D-02", v.clone(), name, 0, &[res.lateness]);
+        row.metric = "firing lateness".into();
+        r.push(row);
+    };
+    if o.wants("tokio-cron") {
+        rows(r, "tokio-cron", cronjobs::d02_tokio(n, period, run_for));
+    }
+    if o.wants("apalis-cron") {
+        rows(r, "apalis-cron", cronjobs::d02_apalis(n, period, run_for));
     }
 }

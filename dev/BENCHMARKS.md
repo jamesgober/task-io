@@ -47,6 +47,8 @@ Each results file records the exact CPU, OS build, kernel, power plan, disk (for
 - **Allocations per operation:** the counting allocator, measured after a warm-up of 1,000,000 operations.
 - **Reproducible:** `cargo run --release -p compare -- <suite>` reproduces any table. Results are committed as `compare/results/<YYYY-MM-DD>-<host>.md`.
 - **Failing contenders:** if a competitor cannot run a workload (missing feature), the row says so and the remaining competitors set the bar. A workload no competitor supports uses its absolute targets only.
+- **Slow contenders (time box):** a contender too slow to finish a workload's count within its time box (P-01: 120 s per run) is measured on what it completes in that time, and the row states how many operations were measured. The time box never applies to task-io: it always runs the full count.
+- **Equal durability:** a durable contender is measured with its data on stable storage before the acknowledgment, whatever its own default is; its default is also reported, labelled, when it is weaker (for example apalis-sqlite's `setup()` sets `synchronous = OFF`).
 
 **Competitor set** (latest stable at measurement time; extend it in `0.2.0` with any faster job or pool crate found in the survey, never shrink it):
 
