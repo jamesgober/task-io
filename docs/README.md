@@ -4,16 +4,13 @@ Reference documentation for the `task-io` crate.
 
 ## Sections
 
-- [API Reference](./API.md) - the public API surface.
+- [API Reference](./API.md): every public item, with examples.
+- [Release notes](./release/): one file per release.
+
+Added as the crate grows: `ARCHITECTURE.md` (0.2.0), `PERFORMANCE.md` and `PLATFORM-NOTES.md` (0.3.0), `STABILITY-1.0.md` (0.9.0).
 
 ## Status
 
-This crate is in early scaffolding. The documentation below describes
-the intended shape; the implementation is not yet complete. See the
-repository's `.dev/ROADMAP.md` for milestone planning.
+Scaffold (`0.1.0`). The design is in [`../dev/PLAN.md`](../dev/PLAN.md), the performance contract in [`../dev/BENCHMARKS.md`](../dev/BENCHMARKS.md), and the schedule in [`../dev/ROADMAP.md`](../dev/ROADMAP.md).
 
-## License
-
-Licensed under the Apache License, Version 2.0.
-
-Copyright (C) 2026 James Gober.
+<sub>Copyright &copy; 2026 <strong>James Gober</strong>. Licensed under Apache-2.0 OR MIT.</sub>

@@ -1,47 +1,90 @@
+# =============================================================================
+#  R E P S   ·   task-io
+# =============================================================================
 [package]
-name = "task-io"
+name    = "task-io"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.75"
+
+# Minimum Supported Rust Version (MSRV)
+rust-version = "1.85"
+edition = "2024"
+
+# License
+license = "Apache-2.0 OR MIT"
+
+# Readme
 readme = "README.md"
-license = "Apache-2.0"
 
-authors = [
-    "James Gober <me@jamesgober.com>"
-]
+# Description
+description = "Task runtime for Rust: spawn async tasks, blocking work, and actors on one work-stealing scheduler, with supervision, timers, durable jobs, and distributed dispatch. Dependency-free."
 
-description = "Distributed task scheduling and dispatch pipeline for Rust. Tasks flow across nodes with delivery guarantees, retries, priority lanes, dead-letter handling, and back-pressure. The enterprise companion to in-process schedulers like task-forge."
+# Keywords (5 max)
+keywords = ["runtime", "scheduler", "actor", "async", "task"]
 
-keywords = [
-    "task",
-    "scheduler",
-    "queue",
-    "distributed",
-    "io"
-]
+# Categories
+categories = ["concurrency", "asynchronous"]
 
-categories = [
-    "concurrency",
-    "network-programming",
-    "asynchronous"
-]
-
-documentation = "https://docs.rs/task-io"
-repository    = "https://github.com/jamesgober/task-io"
+# Links
 homepage      = "https://github.com/jamesgober/task-io"
+repository    = "https://github.com/jamesgober/task-io"
+documentation = "https://docs.rs/task-io"
+
+# Authors
+authors = ["James Gober <me@jamesgober.com>"]
+
+# Keep development-only paths out of the published package.
+exclude = [
+    "/.dev",
+    "/.claude",
+    "/.github",
+    "/dev",
+    "/docs",
+    "/benches",
+    "/tests",
+    "/compare",
+    "/fuzz",
+]
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
-[dependencies]
+[lib]
+name = "task_io"
+path = "src/lib.rs"
 
+
+# FEATURE FLAGS
+# #################################
+[features]
+default = []
+
+
+# DEPENDENCIES
+# #################################
+[dependencies]
+# None. The scheduler, task memory, queues, timers, and the OS calls they
+# need (thread parking, CPU topology, affinity) are all in this crate.
+
+
+# DEV DEPENDENCIES
+# #################################
 [dev-dependencies]
 
-[features]
-default = ["std"]
-std = []
 
+# RELEASE PROFILE
+# #################################
 [profile.release]
-opt-level = 3
-lto = "thin"
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+strip         = "symbols"
+
+# Benchmarks measure the code users ship, so they use the release settings.
+# Cargo always builds benches with unwinding, which criterion and the
+# panic-isolation benches need.
+[profile.bench]
+inherits      = "release"
+strip         = "none"
+debug         = "line-tables-only"

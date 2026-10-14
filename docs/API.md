@@ -1,13 +1,22 @@
 # task-io - API Reference
 
-> Authoritative reference for the public API of `task-io`.
+> Reference for every public item in `task-io`, with examples.
+> **Status: scaffold (`0.1.0`).** The public API is written here at `0.2.0` (design lock); see [`../dev/ROADMAP.md`](../dev/ROADMAP.md) and the planned shape in [`../dev/PLAN.md`](../dev/PLAN.md#6-api-shape-planned).
 
-## Status
+<sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
 
-Not yet specified. This document is generated alongside the public
-API as the crate matures. See `REPS.md` for the design contract and
-`.dev/ROADMAP.md` for the milestone schedule.
+## Table of contents
 
-## Copyright
+- [`VERSION`](#version)
 
-Copyright (C) 2026 James Gober. Licensed under Apache-2.0.
+## `VERSION`
+
+```rust
+pub const VERSION: &str;
+```
+
+The crate version, populated by Cargo at build time.
+
+```rust
+println!("task-io {}", task_io::VERSION);
+```
