@@ -70,6 +70,7 @@ Columns: id, workload (exact), primary metric, statistics gated, competitors.
 | E-10 | memory: 1,000,000 tasks parked on a pending future | bytes per task (heap and RSS); heap allocations per spawn in steady state | median; **abs: 0 allocations** for futures up to the inline size class | tokio, async-executor, glommio, `may`, Go goroutines (reference only, not gated) |
 | E-11 | runtime start and stop; shutdown with 1,000,000 pending tasks | time | median | tokio, async-executor |
 | E-12 | 32 external OS threads each spawn 100,000 tasks into one runtime | wall time | median | tokio, async-executor |
+| E-13 | monitors: 1,000,000 monitored tasks, 10% panic; time from the end of a task to its monitor receiving the exit with the cause | latency | p50, p99 | tokio (`JoinSet::join_next` and awaiting a `JoinHandle`), async-executor (awaiting a `Task`) |
 
 ### 4.2 Timers
 
@@ -87,24 +88,7 @@ Columns: id, workload (exact), primary metric, statistics gated, competitors.
 | C-03 | oneshot: create, send, receive | ns per operation | median, p99 | tokio oneshot, futures oneshot |
 | C-04 | semaphore acquire/release under 32-way contention | ns per pair | median, p99 | tokio Semaphore, async-lock |
 
-### 4.4 Actors (L2)
-
-Workloads follow the Savina actor benchmark suite (Imam and Sarkar, 2014) with the parameters written here.
-
-| Id | Workload | Primary metric | Gated | Competitors |
-|---|---|---|---|---|
-| A-01 | ping-pong: 2 actors, 1,000,000 round trips | wall time | median | actix, ractor, kameo, xtra |
-| A-02 | thread ring: 503 actors, token passed 10,000,000 hops | wall time | median | same |
-| A-03 | counting: one actor receives 10,000,000 increments | wall time | median | same |
-| A-04 | fork-join throughput: 64 actors, 1,000,000 messages each | wall time | median | same |
-| A-05 | fork-join creation: create 1,000,000 actors, each handles one message and stops | wall time | median | same |
-| A-06 | big: 1,000 actors send 1,000,000 messages to random peers | wall time | median | same |
-| A-07 | chameneos: 100 creatures, 2,000,000 meetings | wall time | median | same |
-| A-08 | memory: 1,000,000 idle actors | bytes per actor | median | same |
-| A-09 | supervision: an actor panics; time until the restarted actor handles its next message | latency | p50, p99 | ractor, kameo (actix has no equivalent; noted) |
-| A-10 | ask (request and reply) round trip | latency | p50, p99 | same as A-01 |
-
-### 4.5 Jobs (L3)
+### 4.4 Jobs (L2)
 
 | Id | Workload | Primary metric | Gated | Competitors |
 |---|---|---|---|---|
@@ -114,7 +98,7 @@ Workloads follow the Savina actor benchmark suite (Imam and Sarkar, 2014) with t
 | J-04 | kill -9 with 1,000,000 pending jobs, restart | time to resume; lost jobs; duplicate effects per idempotency key | median; **abs: 0 lost, 0 duplicates** | same (where supported) |
 | J-05 | 10% of jobs fail and retry with backoff | completed jobs per second | median | same |
 
-### 4.6 Stability under stress
+### 4.5 Stability under stress
 
 | Id | Workload | Primary metric | Gated | Competitors |
 |---|---|---|---|---|
@@ -123,9 +107,13 @@ Workloads follow the Savina actor benchmark suite (Imam and Sarkar, 2014) with t
 | S-03 | 10% of tasks panic | throughput; workers lost | median; **abs: 0 workers lost** | tokio |
 | S-04 | 24-hour soak, mixed workload | memory drift; thread count drift | **abs: zero drift** after warm-up | none |
 
-### 4.7 Cluster (L4)
+### 4.6 Cluster (L3)
 
-Workloads are finalized in the `0.7.0` design and added here before that phase starts. Planned: remote spawn latency, remote `tell` and `ask` latency and throughput, job failover time after node loss, and recovery after a partition heals. Planned competitors: ractor's cluster support, kameo remote actors, and published Akka and Orleans numbers for context only.
+Workloads are finalized in the `0.6.0` design and added here before that phase starts. Planned: remote spawn latency and throughput, distributed job enqueue-to-start latency, job failover time after node loss, and recovery after a partition heals. Planned competitors: distributed job systems that run locally (to be chosen in the `0.6.0` design), with published Temporal and Sidekiq numbers for context only.
+
+### 4.7 Moved out
+
+The actor suite (Savina workloads, supervision restart latency) moves to `actor-io` and `spawn-io` with the same gate (PLAN D-015). task-io keeps E-13, which measures the monitor primitive those crates are built on.
 
 ---
 

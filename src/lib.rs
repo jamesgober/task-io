@@ -1,10 +1,10 @@
 //! # task_io
 //!
 //! The task runtime for the `-io` crates: one scheduler that runs async
-//! tasks, blocking work, CPU fork-join work, and actors on the same set of
-//! worker threads. It owns spawning, work stealing, parking, timers,
-//! cancellation, panic isolation, supervision, durable jobs, and, later,
-//! dispatch across nodes.
+//! tasks, blocking work, and CPU fork-join work on the same set of worker
+//! threads. It owns spawning, work stealing, parking, timers, cancellation,
+//! panic isolation, task monitors, durable jobs, and, later, dispatch across
+//! nodes. Actors and spawns are separate crates built on top of it.
 //!
 //! It does not own sockets or an IO reactor. `net-io` owns those and plugs
 //! into the scheduler through a driver seam, so a server, a database

@@ -29,17 +29,16 @@
 
 ## 1. Purpose
 
-task-io is the place where work runs. Anything in the portfolio that wants something done concurrently hands it to task-io: an async task, a blocking call, a CPU-heavy fork-join computation, an actor that owns state and receives messages, a job that has to survive a crash, or, later, work that should run on another node.
+task-io is the place where work runs. Anything in the portfolio that wants something done concurrently hands it to task-io: an async task, a blocking call, a CPU-heavy fork-join computation, a job that has to survive a crash, or, later, work that should run on another node. Actors (`actor-io`) and spawns (`spawn-io`) are separate crates built on top of it (D-015).
 
 It owns:
 
 - spawning, and the memory every task lives in,
 - the scheduler: worker threads, run queues, work stealing, parking and waking, CPU topology,
 - timers, deadlines, and cancellation,
-- panic isolation and supervision (restart what failed, by policy),
-- actors: typed mailboxes, addresses, request and reply,
+- panic isolation, and monitors that tell a supervisor when and why a task ended,
 - durable jobs: delayed, recurring, retried, dead-lettered, idempotent,
-- distributed dispatch: placing tasks, actors, and jobs on other nodes (later phase).
+- distributed dispatch: placing tasks and jobs on other nodes (later phase).
 
 The goal is not to be another runtime. The goal is to be the fastest, most stable, and simplest task runtime available in any language, measured, with the numbers published. Section 4 turns that into hard rules.
 
@@ -60,23 +59,24 @@ Every consumer below already exists or is planned, and each one has written down
 | `service-kernel` | supervised workers, watchdog, circuit breaker; today these sit on tokio | `service-kernel/src/worker` |
 | `net-io` | a place to run connection handlers; its reactor (0.5.0) wakes tasks through task-io's driver seam | `net-io/dev/PLAN.md` |
 | `store-io`, `raft-io`, `rpc-io` | completion handling and background work without each crate running its own threads | their plans |
+| `spawn-io` (planned) | the base for James's spawns: monitored tasks, exit causes, deadlines, placement, blocking work, the job store as a mission ledger | `_strategy/SPAWN-IO.md` section 5 |
+| `actor-io` (planned, if needed) | the base for message-only actors | `_strategy/SPAWN-IO.md` S-2 |
 
 ### 2.2 Layers
 
 ```
-            application code, services, Hive DB, LexerSketch programs
+      application code, services, Hive DB, LexerSketch programs, spawn-io, actor-io
                                    |
    +----------------------------------------------------------------+
-   |  L4  cluster: remote spawn, remote actors, distributed jobs     |  0.7.0
-   |  L3  jobs: durable queue, delay, cron, retry, DLQ, idempotency  |  0.5.0
-   |  L2  actors: mailboxes, addresses, ask/tell, supervision        |  0.4.0
-   |  L1  core: tasks, scheduler, timers, cancellation, channels     |  0.3.0
+   |  L3  cluster: remote spawn, distributed jobs                    |  0.6.0
+   |  L2  jobs: durable queue, delay, cron, retry, DLQ, idempotency  |  0.4.0
+   |  L1  core: tasks, scheduler, timers, cancellation, monitors     |  0.3.0
    +----------------------------------------------------------------+
         |  driver seam (trait)            |  storage seam (trait)   |  transport seam (trait)
      net-io reactor                  memory / store-io          rpc-io + tls-net + raft-io
 ```
 
-Each layer only uses the public API of the layer below it. A user who only wants L1 pays nothing for L2 to L4: they are behind additive features and add no code, no memory, and no branches to L1's hot paths.
+Each layer only uses the public API of the layer below it. A user who only wants L1 pays nothing for L2 and L3: they are behind additive features and add no code, no memory, and no branches to L1's hot paths.
 
 ---
 
@@ -89,8 +89,7 @@ Each layer only uses the public API of the layer below it. A user who only wants
 - Structured concurrency (scopes), cancellation, deadlines, join and select helpers.
 - A timer wheel: sleep, interval, deadline, timeout.
 - The synchronization primitives the runtime itself needs, made public: oneshot, bounded MPSC, broadcast, notify, semaphore, and a cancellation token.
-- Actors and supervision trees.
-- The spawn model James has designed (section 5.10).
+- Task monitors: exit notification with the cause, the base that supervisors in `spawn-io` and `actor-io` are built on.
 - Durable jobs with a pluggable store.
 - Distribution across nodes with a pluggable transport and membership.
 - A deterministic simulation mode for testing (section 5.15).
@@ -107,6 +106,8 @@ Each layer only uses the public API of the layer below it. A user who only wants
 | Wire protocol and encryption between nodes | `rpc-io`, `tls-net` | same |
 | Logging and metrics backends | `log-io`, `metrics-lib` | task-io emits through a sink trait |
 | Application protocols, HTTP | the `-net` crates | not a runtime concern |
+| Spawns (spawner, missions, ledger, replacement, elastic replication) | `spawn-io` (planned) | James's design, built on task-io; see `_strategy/SPAWN-IO.md` |
+| Actors, mailboxes, supervision trees | `actor-io` (planned, if needed) | single responsibility: task-io runs work, it does not define programming models on top of it |
 
 ---
 
@@ -123,8 +124,8 @@ These are requirements, not goals. A release that misses any of them does not sh
 
 ### 4.2 Stability and safety
 
-- **The runtime never dies because of user code.** A panic in a task, actor, or job is caught at the task boundary and returned as an error or handled by the supervisor; the worker thread keeps running.
-- **Nothing is unbounded.** Every queue, mailbox, timer set, job store, and retry loop has a limit that is checked before memory is committed. Overload produces back-pressure or a typed rejection, never unbounded growth.
+- **The runtime never dies because of user code.** A panic in a task or job is caught at the task boundary and returned as an error or reported to its monitor; the worker thread keeps running.
+- **Nothing is unbounded.** Every queue, channel, timer set, job store, and retry loop has a limit that is checked before memory is committed. Overload produces back-pressure or a typed rejection, never unbounded growth.
 - **No lost work.** A task reaches exactly one end state. A job that was acknowledged as durable is never lost, including across a crash at any instruction.
 - **Fail closed and fail visible.** Every error is typed, `#[non_exhaustive]`, and says what to do. No silent drops.
 - **Proven, not hoped.** Every lock-free structure has a `loom` model; every `unsafe` block runs under Miri; every invariant in DIRECTIVES section 4 has a test that would fail if it broke.
@@ -167,9 +168,9 @@ src/
   blocking/       blocking work, compensation workers
   local/          !Send tasks
   sim/            deterministic simulation scheduler (feature `sim`)
-  actor/          (feature `actor`) Actor, Address, mailbox, supervision, registry
+  monitor/        task monitors and exit causes (the base for spawn-io and actor-io)
   job/            (feature `job`) Job, queue, schedule, retry, DLQ, Store trait, memory store
-  cluster/        (feature or adapter crate, decided at 0.7.0) remote spawn, remote actors
+  cluster/        (feature or adapter crate, decided at 0.6.0) remote spawn, distributed jobs
   observe/        counters, histograms, event sink trait
   sys/            (unsafe) OS calls std lacks: topology, affinity, futex / WaitOnAddress
 ```
@@ -204,8 +205,7 @@ Topology is read at start through `sys/` (Linux sysfs, Windows `GetLogicalProces
 | blocking call | `spawn_blocking(f)` | runs on a worker that is handed off: the worker's queue moves to a spare worker so async tasks keep running (Go-style handoff), and the spare count is capped |
 | CPU fork-join | `join(a, b)`, `scope(|s| ...)` | rayon-style: the second half is pushed to the local deque and run inline if nobody stole it; evaluated against heartbeat scheduling in RESEARCH I-04 |
 | thread-local | `spawn_local(fut)` | stays on one worker; no atomics on its hot path |
-| actor | `start(actor)` (L2) | a task that drains a mailbox, with handoff scheduling between actors that message each other |
-| job | `jobs().enqueue(..)` (L3) | stored, then run as a task when due |
+| job | `jobs().enqueue(..)` (L2) | stored, then run as a task when due |
 
 One pool means one set of threads, one memory budget, one place to measure. If R&D shows a split pool wins a gated benchmark, the split is adopted and recorded.
 
@@ -221,28 +221,34 @@ Hierarchical timing wheel per worker (Varghese and Lauck), O(1) insert and cance
 
 ### 5.8 Channels and synchronization
 
-The runtime needs oneshot (join results), bounded MPSC (mailboxes), notify (parking), and a semaphore (limits). They are written once, tuned for the scheduler (a send that wakes a receiver on the same worker uses the LIFO slot), and made public so users do not need another crate.
+The runtime needs oneshot (join results), bounded MPSC (work hand-off between tasks), notify (parking), and a semaphore (limits). They are written once, tuned for the scheduler (a send that wakes a receiver on the same worker uses the LIFO slot), and made public so users do not need another crate.
 
-### 5.9 Actors and supervision (L2)
+### 5.9 Monitors
 
-- `Actor` trait with a typed message, an `Address<A>` that is cheap to clone, `tell` (fire and forget) and `ask` (request and reply with a deadline).
-- Bounded mailbox; full mailbox is back-pressure (`tell` waits) or a typed error (`try_tell`).
-- System messages (stop, link exit, supervisor signals) bypass the user queue so a flooded actor can still be stopped.
-- Supervision trees in the OTP model: one-for-one, one-for-all, rest-for-one; restart intensity (N restarts in T seconds) before escalating; links and monitors.
-- Every actor runs as a task, so actors get the same scheduler, metrics, and simulation mode for free.
-- Location transparency is in the address type from day one, so remote actors (L4) need no API change.
+A monitor is how code above task-io learns that a task ended, and why, without polling. It is the one primitive every supervisor needs, so task-io provides it once and does not build supervisors itself.
 
-### 5.10 The spawn model (James)
+- `monitor(&handle)` returns a receiver that gets exactly one `Exit` per monitored task: `Completed`, `Cancelled`, or `Panicked` (with the payload), plus the task id and the time it ended.
+- Any number of monitors per task; monitoring a task that already ended delivers its exit immediately.
+- The exit is delivered by the worker that finished the task, with no extra thread and no allocation on the task's hot path (RESEARCH I-13).
+- Restart policies, mission ledgers, mailboxes, and supervision trees are not here; they live in `spawn-io` and `actor-io` (D-015).
 
-James has a spawn design of his own that task-io must implement. **It is not written down yet.** Until James writes it here:
+### 5.10 What spawn-io and actor-io need from task-io
 
-- no agent invents, guesses, or fills in this section,
-- the design lock (`0.2.0`) cannot exit (ROADMAP),
-- the rest of the design keeps room for it: the task header, the scheduler, and the public API must not be frozen in a way that would block it.
+James's spawn concept (spawner, missions, a mission ledger, instant replacement that resumes at the last committed step, elastic replication) is written down in `_strategy/SPAWN-IO.md`. It belongs to `spawn-io`, a separate crate built on task-io. Actors, if they are built, belong to `actor-io`. task-io's job is to give both of them what they need, so neither has to change task-io later:
 
-When James describes it, it is written here in his words first, then specified (types, semantics, invariants, tests, benchmarks), then checked against sections 4 and 7.
+| Need | task-io provides | Where |
+|---|---|---|
+| know when and why a spawn ended | monitors with the exit cause and panic payload | 5.9 |
+| replace a stuck spawn | abort, deadlines, timers for heartbeats and step budgets | 5.6, 5.7 |
+| spawns that use files and services | blocking work that never stalls async tasks | 5.5 |
+| keep a spawner's spawns close together | placement hints (core complex, NUMA node) | 5.4 |
+| talk between spawner and spawns | bounded channels | 5.8 |
+| a durable mission ledger | the job `Store` trait | 5.11 |
+| test replay at every step | the deterministic simulation mode | 5.15 |
 
-### 5.11 Jobs (L3)
+Any change to this list is agreed with James, because it shapes his design.
+
+### 5.11 Jobs (L2)
 
 - `Job` handlers are registered by name with a typed payload; payloads are bytes to the store, decoded by the handler.
 - Enqueue now, after a delay, at a time, or on a cron schedule.
@@ -254,13 +260,13 @@ When James describes it, it is written here in his words first, then specified (
 - A `Store` trait. A memory store ships in the crate. A durable store uses a first-party storage crate (O-6). Every store implementation must pass the same crash-test suite (kill at every step).
 - Delivery guarantee, stated precisely: **at-least-once execution, at-most-once effect per idempotency key within the window.** Exactly-once is not claimed because it cannot be guaranteed for effects outside the store.
 
-### 5.12 Distribution (L4)
+### 5.12 Distribution (L3)
 
 - Membership and leases through `raft-io`; transport through `rpc-io` over `net-io` with `tls-net` (mutual authentication); all behind traits.
 - Remote spawn runs only **registered** task types, named and versioned; no code or closures cross the wire.
-- Remote actors through the same `Address` type; distributed jobs with leases fenced by the raft term.
+- Distributed jobs with leases fenced by the raft term.
 - Placement by load and locality; work moves to idle nodes in batches.
-- Partitions, node loss, and clock skew are tested with a Jepsen-style harness before the layer ships (0.7.0).
+- Partitions, node loss, and clock skew are tested with a Jepsen-style harness before the layer ships (0.6.0).
 
 ### 5.13 Driver seam (IO)
 
@@ -284,7 +290,7 @@ A `sim` feature replaces the scheduler, clock, and randomness with a single-thre
 | injector batch | 32 | external spawn contention |
 | poll budget | 128 operations per poll | one task starving others |
 | spare (handoff) workers | equal to workers | thread explosion from blocking work |
-| mailbox | 1,024 messages | a slow actor holding unbounded memory |
+| channel | 1,024 messages | a slow receiver holding unbounded memory |
 | timers | 1,048,576 per runtime | timer floods |
 | job retries | 10, backoff capped at 1 hour | retry storms |
 | dedupe window | 24 hours | duplicate effects |
@@ -314,23 +320,19 @@ fn main() -> Result<(), task_io::Error> {
 }
 ```
 
-**Actors (L2).**
+**Monitors.**
 
 ```rust
-struct Counter { total: u64 }
-
-impl task_io::Actor for Counter {
-    type Msg = u64;
-    async fn handle(&mut self, n: u64, _cx: &mut task_io::Cx<Self>) {
-        self.total += n;
-    }
+let handle = task_io::spawn(work());
+let exit = task_io::monitor(&handle);              // exactly one Exit per task
+match exit.recv().await? {
+    Exit::Completed(_) => {}
+    Exit::Panicked { id, payload, .. } => restart(id, payload),
+    Exit::Cancelled(_) => {}
 }
-
-let counter = rt.start(Counter { total: 0 });     // supervised by the root supervisor
-counter.tell(5).await?;                            // bounded mailbox: waits when full
 ```
 
-**Jobs (L3).**
+**Jobs (L2).**
 
 ```rust
 rt.jobs().register("send_email", send_email)?;
@@ -349,7 +351,7 @@ rt.jobs().cron("0 3 * * *", "cleanup_sessions")?;
 | What does `spawn` do when the live-task limit is reached? | `spawn` waits for capacity in async context; `try_spawn` returns `SpawnError::Full`; outside async context `spawn` returns `SpawnError::Full` | no unbounded growth (4.2), simplest correct behavior |
 | What does `task_io::spawn` do outside a runtime? | returns a handle that resolves to `JoinError::NoRuntime`; never panics | no reachable panics |
 | Does dropping a `JoinHandle` detach or cancel? | detach (like `std::thread`), with `scope` as the structured alternative | least surprise for users coming from std and tokio |
-| `async fn` in the `Actor` trait and `Send` bounds | use return-position `impl Future + Send` in the trait | compiles on 1.85 without a macro |
+| Does a monitor see the output value, or only the cause? | only the cause and the task id; the output goes to the `JoinHandle` | one owner per value, no clone on exit |
 | Free functions (`task_io::spawn`) vs handle methods only | both: free functions use the current runtime context, `Handle` methods for code outside it | Tier 1 brevity |
 
 ---
@@ -361,12 +363,12 @@ What can go wrong, and what task-io guarantees when it does.
 | Failure | Guarantee | Test |
 |---|---|---|
 | a task panics | the panic is caught at the task boundary; `JoinHandle` returns `JoinError::Panicked` with the payload; the worker keeps running | unit, S-03 panic storm |
-| an actor panics | its supervisor applies the strategy; restart intensity exceeded escalates to the parent; the root supervisor stops the runtime cleanly with a report | supervision suite, A-09 |
+| a monitored task panics | every monitor receives `Exit::Panicked` with the payload, exactly once; what happens next is the supervisor's decision (spawn-io, actor-io) | monitor suite, E-13 |
 | a task blocks a worker without `spawn_blocking` | a watchdog detects a poll longer than the threshold, reports it, and moves that worker's queue to a spare worker | S-02 |
 | spawn loop / message flood / timer flood | limits refuse or delay new work before memory is committed | overload suite S-01 |
 | out of memory in an allocation the runtime makes | the runtime pre-reserves its own structures; a failed task allocation returns `SpawnError::Alloc` | fault-injecting allocator test |
 | process crash (kill -9, power loss) | acknowledged durable jobs survive; in-flight jobs are retried after their lease expires; no job runs twice under the same idempotency key inside the window | J-04, crash-at-every-step suite |
-| a node is lost or partitioned (L4) | its leases expire; work is re-placed; fencing tokens reject late results from the old owner | Jepsen-style suite |
+| a node is lost or partitioned (L3) | its leases expire; work is re-placed; fencing tokens reject late results from the old owner | Jepsen-style suite |
 | shutdown with work in flight | `shutdown(deadline)` stops accepting work, lets running work finish until the deadline, then cancels the rest; when it returns no user code runs and all threads are joined | shutdown suite, E-11 |
 | `panic = "abort"` in the user's profile | panic isolation is impossible by definition; the docs say so; supervision then restarts at process level (`service-kernel`) | documented, one test with abort |
 
@@ -375,10 +377,10 @@ What can go wrong, and what task-io guarantees when it does.
 ## 8. Security responsibilities
 
 - **Hostile input is the default.** Job payloads and cluster messages are untrusted bytes: size limits are checked before allocation, decoders are fuzzed, and decode errors are typed.
-- **No code over the wire.** Remote spawn and remote actors only run registered, named, versioned task types. A peer cannot make a node run anything it did not register.
+- **No code over the wire.** Remote spawn only runs registered, named, versioned task types. A peer cannot make a node run anything it did not register.
 - **Authenticated peers only.** Cluster transport requires mutual authentication (`tls-net`). Membership changes are raft-committed.
 - **Integrity at rest.** Durable job records carry a checksum; a corrupt record goes to the dead-letter queue with the reason, never runs. Encryption at rest is available through `crypt-io` for stores that hold sensitive payloads.
-- **Isolation between tenants.** Per-tenant quotas (tasks, mailbox, jobs, CPU share through weighted lanes) so one tenant cannot starve another (Hive DB tenants, web stack users).
+- **Isolation between tenants.** Per-tenant quotas (tasks, channels, jobs, CPU share through weighted lanes) so one tenant cannot starve another (Hive DB tenants, web stack users).
 - **No denial of service through the scheduler.** Every limit in 5.16 exists to cap what one caller can consume.
 - **Every security measure states its cost**, in latency and memory, measured; every performance shortcut states its security effect (from the stack-wide rule in `.claude/CLAUDE.md`).
 
@@ -394,12 +396,13 @@ None at runtime. Dev-only tooling is allowed: `criterion` (benches), `proptest` 
 
 | Crate | Relationship | When |
 |---|---|---|
-| `net-io` | implements task-io's `Driver` trait (task-io never depends on net-io) | 0.6.0 |
-| `store-io` | backs the durable job store (O-6) | 0.5.0 |
-| `raft-io`, `rpc-io`, `tls-net` | cluster membership, transport, authentication | 0.7.0 |
+| `net-io` | implements task-io's `Driver` trait (task-io never depends on net-io) | 0.5.0 |
+| `store-io` | backs the durable job store (O-6) | 0.4.0 |
+| `raft-io`, `rpc-io`, `tls-net` | cluster membership, transport, authentication | 0.6.0 |
 | `log-io`, `metrics-lib` | implement the `EventSink` trait | any |
-| `service-kernel` | moves its supervised workers onto task-io | after 0.4.0 |
-| `crypt-io` | encryption at rest for job stores | 0.5.0 |
+| `service-kernel` | moves its supervised workers onto task-io | 0.5.0 |
+| `spawn-io`, `actor-io` | built on task-io's monitors, deadlines, channels, placement, and job store | after 0.4.0 |
+| `crypt-io` | encryption at rest for job stores | 0.4.0 |
 | `clock-lib` | considered for the mockable clock in `sim` | 0.2.0 decides |
 
 Any first-party dependency must be a published version, never a `path` dependency to a sibling repository (CI checks out each repository alone).
@@ -423,11 +426,10 @@ Summary only; exit criteria live in [`ROADMAP.md`](./ROADMAP.md).
 | 0.1.0 | Scaffold | repository, template, this plan, the performance contract, the R&D program |
 | 0.2.0 | R&D and design lock | competitor harness and baseline numbers, experiments with verdicts, the spawn model, public API locked in `docs/API.md` |
 | 0.3.0 | Core | tasks, scheduler, stealing, parking, topology, timers, cancellation, scopes, blocking handoff, local tasks, sync primitives, simulation mode |
-| 0.4.0 | Actors | actors, mailboxes, ask/tell, supervision trees, links, monitors, registry |
-| 0.5.0 | Jobs | durable jobs, delay, cron, retry, DLQ, idempotency, lanes, leases, stores |
-| 0.6.0 | Integration | driver seam with net-io, Hive DB morsel scheduling, LexerSketch scheduler binding, service-kernel migration |
-| 0.7.0 | Cluster | remote spawn, remote actors, distributed jobs, partition testing |
-| 0.8.0 | Advance | second R&D round; adopt what wins; all gates re-run |
+| 0.4.0 | Jobs | durable jobs, delay, cron, retry, DLQ, idempotency, lanes, leases, stores |
+| 0.5.0 | Integration | driver seam with net-io, Hive DB morsel scheduling, LexerSketch scheduler binding, service-kernel migration |
+| 0.6.0 | Cluster | remote spawn, distributed jobs, partition testing |
+| 0.7.0 | Advance | second R&D round; adopt what wins; all gates re-run |
 | 0.9.0 | Hardening | fuzzing, 72-hour soak, chaos, adversarial review, audit |
 | 1.0.0 | Stable | frozen after three consumers have run it in production |
 
@@ -440,7 +442,7 @@ Summary only; exit criteria live in [`ROADMAP.md`](./ROADMAP.md).
 - **Miri** for every module with `unsafe` (`cargo +nightly miri test`), including the slab, raw task pointers, and queues; Stacked and Tree Borrows both.
 - **Sanitizers** on Linux nightly: ThreadSanitizer and AddressSanitizer on the stress suite.
 - **Property tests** (`proptest`): queue operations against a model, timer wheel against a sorted-list model, scheduler state machine against a model, job state machine against a model.
-- **Deterministic simulation:** thousands of seeds per CI run over the scheduler, actors, and jobs; any failing seed becomes a permanent regression test.
+- **Deterministic simulation:** thousands of seeds per CI run over the scheduler, monitors, and jobs; any failing seed becomes a permanent regression test.
 - **Stress tests** on Linux, macOS, and Windows: spawn storms, steal storms, wake races, shutdown under load, all with leak checks (tasks, threads, memory return to baseline).
 - **Fault injection:** a panicking future at every poll, a failing allocator, a store that fails or crashes at every step, a clock that jumps.
 - **Crash tests:** kill the process at every step of the job state machine; verify no acknowledged job is lost and no idempotency key runs twice.
@@ -456,7 +458,7 @@ These are James's calls. Each is written so it can be answered with one line.
 
 | Id | Question | Recommendation |
 |---|---|---|
-| O-1 | **Describe your spawn model** (section 5.10). This blocks the `0.2.0` design lock. | write it in your own words; the agent specifies it from there |
+| O-1 | ~~Describe your spawn model.~~ Answered 2026-10-13: written in `_strategy/SPAWN-IO.md`; it belongs to `spawn-io` (D-015). Confirm the list of what task-io provides for it (section 5.10). | confirm the list |
 | O-2 | Publish `0.1.0` to crates.io now to claim the `task-io` name? | yes; the name is free today and the scaffold builds clean |
 | O-3 | REPS says "MUST use tokio". task-io replaces tokio. Record task-io as an exception, or change the REPS rule portfolio-wide to "no rented runtime" (same question as net-io O-1)? | change REPS portfolio-wide |
 | O-4 | Keep the executor and timer wheel inside task-io, with extraction into `cycle-*` crates only when a second consumer needs them alone? | yes |
@@ -477,12 +479,12 @@ The idea register, with hypothesis, method, cost, and status for each, lives in 
 | Id | Date | Decision | Reason |
 |---|---|---|---|
 | D-001 | 2026-10-13 | Template aligned with net-io: edition 2024, MSRV 1.85, `Apache-2.0 OR MIT`, canonical `REPS.md`, `dev/` committed and `.dev/` private, no committed lockfile | portfolio consistency; the May scaffold (edition 2021, MSRV 1.75, Apache only, a stub REPS) was never published |
-| D-002 | 2026-10-13 | Scope is a task runtime (local scheduler, actors, jobs, then distribution), not only distributed dispatch | James asked for workers, actors, and his spawn model here; the web stack needs local jobs now; Hive DB REQ-035 and LexerSketch need a scheduler; nothing else in the portfolio provides one (`cycle` is paused, `task-forge` was never built and its name is taken) |
+| D-002 | 2026-10-13 | Scope is a task runtime (local scheduler, jobs, then distribution), not only distributed dispatch (actors and spawns moved out by D-015) | James asked for workers, actors, and his spawn model here; the web stack needs local jobs now; Hive DB REQ-035 and LexerSketch need a scheduler; nothing else in the portfolio provides one (`cycle` is paused, `task-forge` was never built and its name is taken) |
 | D-003 | 2026-10-13 | No tokio and no third-party runtime dependency; task-io is its own scheduler | ours, not rented; a runtime cannot beat tokio by depending on it (REPS exception pending O-3) |
 | D-004 | 2026-10-13 | Sockets and the reactor stay in net-io; task-io defines a `Driver` trait that net-io implements; task-io never depends on net-io | one-way dependencies; the protocol-free and IO-free split matches net-io D-006 |
-| D-005 | 2026-10-13 | One pool for async, blocking, CPU, local, actor, and job work, with handoff for blocking work | one budget and fewer threads; to be confirmed or reverted by RESEARCH I-01 |
+| D-005 | 2026-10-13 | One pool for async, blocking, CPU, local, and job work, with handoff for blocking work | one budget and fewer threads; to be confirmed or reverted by RESEARCH I-01 |
 | D-006 | 2026-10-13 | Performance gate: primary metric at least 1.20 times the best competitor on every benchmark in BENCHMARKS.md, p99 included; a miss blocks the release; only James can waive | James's mandate: being slower than another library is failure |
-| D-007 | 2026-10-13 | The spawn model is James's design; agents do not invent it, and the design lock waits for it | the idea is his; a guessed version would be built on sand |
+| D-007 | 2026-10-13 | The spawn model is James's design; agents do not invent it (updated by D-015: James described it, and it moves to spawn-io) | the idea is his; a guessed version would be built on sand |
 | D-008 | 2026-10-13 | Panics in user code are caught at the task boundary; the runtime and its workers never die from user code | stability mandate (4.2) |
 | D-009 | 2026-10-13 | `unsafe` only in `raw/`, `queue/`, and `sys/`; until those exist the crate is `#![forbid(unsafe_code)]` | small, auditable unsafe surface; each module gets loom and Miri coverage |
 | D-010 | 2026-10-13 | Competitor benchmarks live in `compare/`, a separate unpublished crate with its own `[workspace]`, never in task-io's dependency graph | keeps `cargo deny` and the published package clean of tokio, rayon, actix and the rest |
@@ -490,3 +492,4 @@ The idea register, with hypothesis, method, cost, and status for each, lives in 
 | D-012 | 2026-10-13 | API simplicity mandate in section 4.3: three-line Tier 1, one way to do each thing | James's mandate |
 | D-013 | 2026-10-13 | Testing mandate in section 4.4 and section 11 | James's mandate: nothing untested, edge cases included |
 | D-014 | 2026-10-13 | `0.2.0` is an R&D phase with a written program (RESEARCH.md) and an innovation requirement: at least three capabilities no benchmarked competitor has, each proven by experiment | James asked for invention, not a copy of existing runtimes |
+| D-015 | 2026-10-13 | Actors move to `actor-io` and spawns to `spawn-io`, separate crates built on task-io; task-io keeps tasks, workers, jobs, and distribution, and adds monitors as the base for supervisors | James: task-io is a specific, single-purpose library; his spawn concept (`_strategy/SPAWN-IO.md`) is its own design; a smaller task-io ships sooner, and the web stack needs it soon |

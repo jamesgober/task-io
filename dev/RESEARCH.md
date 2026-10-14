@@ -1,6 +1,6 @@
 # task-io - R&D Program
 
-> How task-io finds designs that beat every existing runtime, and the register of every idea tried. Read after [`PLAN.md`](./PLAN.md) and [`BENCHMARKS.md`](./BENCHMARKS.md). The main R&D round is `0.2.0`; the second round is `0.8.0`; ideas can be added at any time.
+> How task-io finds designs that beat every existing runtime, and the register of every idea tried. Read after [`PLAN.md`](./PLAN.md) and [`BENCHMARKS.md`](./BENCHMARKS.md). The main R&D round is `0.2.0`; the second round is `0.7.0`; ideas can be added at any time.
 
 ---
 
@@ -45,22 +45,22 @@ Copying tokio's design gets tokio's numbers. The mandate (PLAN 4.1) is at least 
 | I-06 | **V-Cache-aware placement**: on hosts with asymmetric L3 (9950X3D), place cache-heavy work on the large-cache CCD | memory-bound tasks run faster on the V-Cache CCD | a memory-bound benchmark pinned to each CCD | detection of asymmetric caches; must be a no-op elsewhere | measured gain on cache-heavy workloads | proposed |
 | I-07 | **Eventcount parking** (Vyukov) instead of mutex plus condvar | no lost wakeups, no herd, lower wake latency | loom model, E-02, E-04, E-09 | subtle; loom required | E-02 p99 at least 1.20 | proposed |
 | I-08 | **Adaptive spin before park** tuned from measured wake latency | spinning briefly beats parking when work arrives within microseconds; idle CPU stays zero | E-02, E-04, E-09 | wasted CPU if mistuned | E-02 gain with E-09 still at 0 wakeups | proposed |
-| I-09 | **Handoff scheduling for actors**: when actor A sends to idle actor B, B runs next on the same worker (LIFO slot), with a bound | message chains stay in cache | A-01, A-02, A-06 | fairness bound needed | A-01, A-02 at least 1.20 vs the best actor crate | proposed |
+| I-09 | **Handoff scheduling for message chains**: when task A sends on a channel that wakes idle task B, B runs next on the same worker (LIFO slot), with a bound | message chains stay in cache; spawn-io and actor-io inherit the win | E-04, C-01 | fairness bound needed | E-04 and C-01 at least 1.20 | proposed |
 | I-10 | **Sound async scopes** that let children borrow from the parent, despite the scoped-task trilemma | a design exists that is sound and costs nothing on the non-scoped path (for example a scope that blocks on drop, or a scope that owns the borrowed data) | design notes plus Miri; read "The Scoped Task trilemma" (Mandry, 2023) | API complexity | a sound design with a Miri-clean test suite, or a written proof that none fits, and the blocking scope only | proposed |
 | I-11 | **Work rescue**: a watchdog detects a task stuck in one poll and moves the rest of that worker's queue to a spare | tail latency stays bounded even with a misbehaving task (Rust cannot preempt a future) | S-02 | watchdog thread wakes, but only when work is running | S-02 p99 at least 1.20 vs tokio | proposed |
-| I-12 | **Deterministic simulation mode** built into the runtime | seeded replay finds races in task-io and in user code that stress tests miss | build `sim`, run 10,000 seeds over the scheduler and actors, count bugs found vs the stress suite | a second scheduler implementation to keep in sync | finds at least one class of bug the stress suite misses; zero cost when the feature is off | proposed |
-| I-13 | **Supervision in the runtime itself** (OTP model) for tasks and actors, not a library on top | restart latency and correctness beat crates that add supervision later | A-09 | API surface | A-09 at least 1.20 | proposed |
+| I-12 | **Deterministic simulation mode** built into the runtime | seeded replay finds races in task-io and in user code that stress tests miss | build `sim`, run 10,000 seeds over the scheduler, monitors, and jobs, count bugs found vs the stress suite | a second scheduler implementation to keep in sync | finds at least one class of bug the stress suite misses; zero cost when the feature is off | proposed |
+| I-13 | **Monitors in the task header**: the exit cause is delivered by the worker that finished the task, with no extra thread and no allocation | supervisors built on task-io (spawn-io, actor-io) learn of a failure faster than any runtime that makes them poll or join | E-13 | one pointer-sized field per task, or a side table | E-13 at least 1.20; no change to E-01 or E-10 beyond 2% | proposed |
 | I-14 | **Deadline lanes** (earliest deadline first per worker) alongside the normal queue | latency-sensitive tasks keep p99 under load while batch work fills the rest | S-01 with mixed classes | queue complexity | latency-class p99 at least 1.20 vs tokio under S-01 | proposed |
 | I-15 | **Weighted fair lanes per tenant** (deficit round robin) | one tenant cannot starve another; costs nothing when only one tenant exists | multi-tenant variant of S-01 | per-lane state | isolation holds; single-tenant numbers unchanged within 2% | proposed |
-| I-16 | **End-to-end back-pressure**: mailbox and queue capacity propagate to `spawn` and `tell` | overload produces waiting at the source, not memory growth | S-01 | API must stay simple | S-01 absolute targets met | proposed |
+| I-16 | **End-to-end back-pressure**: channel and queue capacity propagate to `spawn` and `send` | overload produces waiting at the source, not memory growth | S-01 | API must stay simple | S-01 absolute targets met | proposed |
 | I-17 | **Group commit for durable jobs** through store-io's Submitter (batched fsync) | durable enqueue throughput beats competitors by a wide margin at equal durability | J-02 | latency of the batch window | J-02 throughput and p99 at least 1.20 | proposed |
 | I-18 | **Leases with fencing tokens** for jobs and distributed work (Gray and Cheriton 1989; Kleppmann 2016) | stale workers can never commit a result after their lease moved | Jepsen-style test, crash suite | a token per lease | 0 stale commits across 10,000 fault-injected runs | proposed |
-| I-19 | **Virtual actors** (Orleans): actors activated on first message and passivated when idle, by identity | large actor populations (one per user or session) cost memory only while active | A-08 variant with 10,000,000 identities | activation latency | memory per inactive identity near zero; activation p99 measured | proposed |
+| I-19 | **Virtual actors** (Orleans) | moved to actor-io (PLAN D-015) | | | | parked: revive in actor-io |
 | I-20 | **Thread-per-core profile** of the same runtime (glommio and monoio style) selected by configuration | one codebase can match thread-per-core runtimes on their own benchmarks | E-01 to E-04 against glommio and monoio on R2 | a second scheduling mode | at least 1.20 vs glommio and monoio on R2 | proposed |
 | I-21 | **Per-worker observability** with no shared atomics; histograms merged on read | full metrics cost under 1% on E-01 | E-01 with and without a sink | memory per worker | less than 1% overhead with a sink attached | proposed |
 | I-22 | **Cooperative budget with automatic yield** at await points of the crate's own primitives | no task starves others without user changes | E-06 | one counter per poll | E-06 max gap at least 1.20 better than tokio | proposed |
 | I-23 | **Stackful option for LexerSketch** (green threads with small stacks) on the same scheduler | scripts that call blocking host functions keep the async workers free | prototype with a context-switch routine in `sys/`; E-03 vs `may` | unsafe surface, per-OS context switch | E-03 at least 1.20 vs `may`; Miri and loom clean where they apply | proposed |
-| I-24 | **The spawn model (James)** | to be written by James (PLAN 5.10, O-1) | to be designed with James | to be measured | to be set with James | waiting on James |
+| I-24 | **The spawn model (James)** | described by James 2026-10-13 in `_strategy/SPAWN-IO.md`; built in spawn-io (PLAN D-015). task-io's part is the list in PLAN 5.10 | | | | moved to spawn-io |
 
 ---
 
@@ -93,7 +93,7 @@ Read each, write the note (rule 5), and cite it in the entries it affects.
 **Timers**
 - Varghese and Lauck, "Hashed and Hierarchical Timing Wheels", SOSP 1987; the tokio time driver source.
 
-**Actors and supervision**
+**Supervision (for monitors here, and for spawn-io and actor-io later)**
 - Armstrong, "Making reliable distributed systems in the presence of software errors", 2003 (OTP supervision).
 - Bernstein et al., "Orleans: Distributed Virtual Actors for Programmability and Scalability", MSR 2014.
 - The Pony runtime scheduler and ORCA.

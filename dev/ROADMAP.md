@@ -6,6 +6,8 @@
 > **Anti-deferral rule:** no listed task moves to a later phase unless this file records the move and the reason, and James approved it.
 >
 > **Every phase also requires:** the full DIRECTIVES section 3 definition of done; every touched benchmark passing the BENCHMARKS gate on R1 and R2; CHANGELOG, README, `docs/API.md`, and `docs/release/vX.Y.Z.md` updated; decisions in PLAN section 14.
+>
+> **Order:** the web stack needs jobs soon, so jobs (0.4.0) come straight after the core. Actors and spawns are separate crates (`actor-io`, `spawn-io`) that start after 0.4.0 (PLAN D-015).
 
 ## v0.1.0 - Scaffold (DONE, 2026-10-13)
 Compiles, CI green, structure correct, no domain logic.
@@ -14,29 +16,29 @@ Compiles, CI green, structure correct, no domain logic.
 - [x] Smoke test; `docs/API.md`; `docs/release/v0.1.0.md`.
 
 ## v0.2.0 - R&D and design lock
-Exit: competitor baselines measured and committed, so every target in BENCHMARKS is a number; every RESEARCH entry I-01 to I-23 has a verdict with evidence; at least ten new entries added; at least three adopted capabilities no competitor has; James's spawn model written and specified; the public API for 0.3.0 to 0.5.0 written in `docs/API.md` and approved by James. No implementation code in `src/` beyond what the docs examples need to compile (the API may be stubbed only if every stub is unreachable from public code and returns a typed error).
+Exit: competitor baselines measured and committed, so every target in BENCHMARKS is a number; every open RESEARCH entry (I-01 to I-23, except I-19, which moved to actor-io) has a verdict with evidence; at least ten new entries added; at least three adopted capabilities no competitor has; the spawn-io and actor-io seams (PLAN 5.10) confirmed by James; the public API for 0.3.0 and 0.4.0 written in `docs/API.md` and approved by James. No implementation code in `src/` beyond what the docs examples need to compile (the API may be stubbed only if every stub is unreachable from public code and returns a typed error).
 
 **Step 1: the harness (first, before any prototype)**
 - [ ] `compare/` crate: its own `[workspace]`, `publish = false`, competitor versions pinned, counting allocator, latency recorder, results writer.
-- [ ] Suites E-01 to E-12, T-01 to T-02, C-01 to C-04, A-01 to A-10, J-01 to J-05, S-01 to S-04 implemented for every listed competitor, each competitor at its documented best (BENCHMARKS section 3).
+- [ ] Suites E-01 to E-13, T-01 to T-02, C-01 to C-04, J-01 to J-05, S-01 to S-04 implemented for every listed competitor, each competitor at its documented best (BENCHMARKS section 3).
 - [ ] Baselines measured on R1 and R2; `compare/results/<date>-R1.md` and `-R2.md` committed; BENCHMARKS section 5 filled with the best competitor and the 1.20 target per row.
 
 **Step 2: reading**
 - [ ] Every source in RESEARCH section 5 read; one note per area in `.dev/research/`.
 
 **Step 3: experiments**
-- [ ] I-01 to I-23: prototype, measure, profile, verdict, evidence (RESEARCH section 3).
+- [ ] Every open entry: prototype, measure, profile, verdict, evidence (RESEARCH section 3).
 - [ ] At least ten new entries from reading, profiling, and failed experiments, each with a verdict.
 - [ ] At least three adopted capabilities that no benchmarked competitor has, each with its winning measurement.
 - [ ] Every adopted idea recorded in PLAN section 14.
 
-**Step 4: the spawn model**
-- [ ] James's spawn model written in PLAN 5.10 in his words (O-1).
-- [ ] Specified: types, semantics, invariants (added to DIRECTIVES section 4), tests, benchmarks (added to BENCHMARKS with competitors or absolute targets).
-- [ ] Placed in a phase (0.3.0 or 0.4.0) with its own checklist in this file.
+**Step 4: the seams for spawn-io and actor-io**
+- [ ] Read `_strategy/SPAWN-IO.md` (James's spawn concept). Do not design spawn-io here; only check that every need in PLAN 5.10 is met by the task-io API.
+- [ ] Each need in PLAN 5.10 mapped to the exact task-io API item that serves it, in `docs/API.md`.
+- [ ] James confirms the list (PLAN O-1).
 
 **Step 5: design lock**
-- [ ] `docs/API.md`: every public type, trait, function, and error variant for 0.3.0 to 0.5.0, with signatures, semantics, limits and their defaults with reasons, and an example per item.
+- [ ] `docs/API.md`: every public type, trait, function, and error variant for 0.3.0 and 0.4.0, with signatures, semantics, limits and their defaults with reasons, and an example per item.
 - [ ] Every question in PLAN section 6 answered with its evidence.
 - [ ] `unsafe` map: every `unsafe` operation planned in `raw/`, `queue/`, `sys/`, with its invariant and the loom or Miri test that covers it.
 - [ ] `sys/` FFI surface per OS: every function, constant, and struct we declare, with its documentation reference.
@@ -45,18 +47,19 @@ Exit: competitor baselines measured and committed, so every target in BENCHMARKS
 - [ ] James approves `docs/API.md`.
 
 ## v0.3.0 - Core
-Exit: every E, T, C, and S benchmark passes the gate on R1 and R2; every task, scheduler, time, and shutdown invariant in DIRECTIVES section 4 has a passing test; loom and Miri clean; 10,000 simulation seeds pass per CI run.
+Exit: every E, T, C, and S benchmark passes the gate on R1 and R2; every task, scheduler, time, monitor, channel, and shutdown invariant in DIRECTIVES section 4 has a passing test; loom and Miri clean; 10,000 simulation seeds pass per CI run.
 - [ ] Error types (`Error`, `SpawnError`, `JoinError`, ...), `#[non_exhaustive]`, tested per variant.
 - [ ] Task memory (`raw/`): size-class slabs, recycling, raw task pointers; Miri suite.
 - [ ] Task header and state word; `JoinHandle`, `AbortHandle`; waker vtable; loom model of every transition.
 - [ ] Queues (`queue/`): local ring deque, injector, eventcount; loom models; property tests against a model.
 - [ ] Workers, LIFO slot, stealing order by topology, parking, searching-worker bound, poll budget.
-- [ ] Topology and affinity in `sys/` for Linux, Windows, macOS.
+- [ ] Topology, affinity, and placement hints in `sys/` for Linux, Windows, macOS.
 - [ ] `Runtime`, `Builder`, `Handle`, runtime context, `block_on`, `spawn`, `try_spawn`, live-task limit.
 - [ ] Blocking work with handoff and the spare-worker cap; watchdog and work rescue (if adopted).
 - [ ] Fork-join: `join`, `scope` (blocking), and the async scope design from I-10.
 - [ ] `spawn_local` and thread-local tasks.
 - [ ] Cancellation token, abort, deadlines, `timeout`.
+- [ ] Monitors: `monitor`, `Exit` with the cause and panic payload (PLAN 5.9); E-13.
 - [ ] Timer wheel; `sleep`, `interval`, `sleep_until`.
 - [ ] `sync/`: oneshot, bounded MPSC, broadcast, notify, semaphore.
 - [ ] Observability: per-worker counters, histograms, `EventSink`.
@@ -66,22 +69,11 @@ Exit: every E, T, C, and S benchmark passes the gate on R1 and R2; every task, s
 - [ ] Examples `01_quick_start.rs` to at least `05_*.rs`.
 - [ ] `docs/PERFORMANCE.md` and `docs/PLATFORM-NOTES.md` started.
 
-## v0.4.0 - Actors and supervision
-Exit: A-01 to A-10 pass the gate on R1 and R2; every actor invariant has a passing test; supervision tested under panic storms.
-- [ ] `Actor` trait, `Cx`, `Address` (location-transparent type), `tell`, `try_tell`, `ask` with deadline.
-- [ ] Bounded mailbox; system-message lane.
-- [ ] Lifecycle hooks: started, stopping, stopped, restarted.
-- [ ] Supervision trees: one-for-one, one-for-all, rest-for-one; restart intensity; escalation; root supervisor.
-- [ ] Links and monitors; registry by name.
-- [ ] Handoff scheduling between actors (if adopted).
-- [ ] Virtual actors (if adopted).
-- [ ] The spawn model, if it was placed in this phase.
-
-## v0.5.0 - Jobs
-Exit: J-01 to J-05 pass the gate on R1 and R2; the crash-at-every-step suite passes for every store; 0 lost jobs and 0 duplicate effects across 10,000 fault-injected runs.
+## v0.4.0 - Jobs
+Exit: J-01 to J-05 pass the gate on R1 and R2; the crash-at-every-step suite passes for every store; 0 lost jobs and 0 duplicate effects across 10,000 fault-injected runs; the web stack's first jobs (email, cleanup, session-expiry sweep) run on it in an example.
 - [ ] Job registry, typed payload codec, size limits.
-- [ ] Enqueue now, after, at; cron parser (fuzzed) and scheduler.
-- [ ] Retry: exponential backoff with full jitter, cap, temporary/permanent classification hook.
+- [ ] Enqueue now, after, at; cron parser (fuzz target first) and scheduler.
+- [ ] Retry: exponential backoff with full jitter, cap, temporary/permanent classification hook (smtp-net).
 - [ ] Dead-letter queue with reason and attempt history.
 - [ ] Idempotency keys and dedupe window.
 - [ ] Priority lanes with deficit round robin; per-tenant quotas.
@@ -89,24 +81,23 @@ Exit: J-01 to J-05 pass the gate on R1 and R2; the crash-at-every-step suite pas
 - [ ] `Store` trait; memory store; durable store per O-6; record checksums; optional encryption through `crypt-io`.
 - [ ] Crash-test harness: kill at every step of the job state machine.
 
-## v0.6.0 - Integration
+## v0.5.0 - Integration
 Exit: a net-io echo server runs on task-io on all three OSes; the Hive DB executor prototype schedules morsels with locality hints on task-io; LexerSketch's `spawn` runs on task-io; service-kernel's supervised workers run on task-io; all gates still pass.
 - [ ] `Driver` trait final; reference adapter in net-io (net-io's repository, depending on task-io).
 - [ ] Locality hints on spawn (NUMA node, CCD, shard) for Hive DB REQ-035.
 - [ ] LexerSketch scheduler binding; the stackful option if I-23 was adopted.
 - [ ] service-kernel migration path, documented.
 
-## v0.7.0 - Cluster
-Exit: cluster benchmarks (BENCHMARKS 4.7, written before this phase starts) pass; the Jepsen-style suite passes (partitions, node loss, clock skew, message loss and duplication) with 0 lost jobs and 0 stale commits.
-- [ ] Cluster workloads and competitors written into BENCHMARKS 4.7.
+## v0.6.0 - Cluster
+Exit: cluster benchmarks (BENCHMARKS 4.6, written before this phase starts) pass; the Jepsen-style suite passes (partitions, node loss, clock skew, message loss and duplication) with 0 lost jobs and 0 stale commits.
+- [ ] Cluster workloads and competitors written into BENCHMARKS 4.6.
 - [ ] Membership and leases through raft-io; transport through rpc-io over net-io with tls-net mutual authentication.
 - [ ] Registered, versioned task types; remote spawn.
-- [ ] Remote actors through `Address`.
 - [ ] Distributed jobs with leases fenced by the raft term.
 - [ ] Placement by load and locality.
 - [ ] Decide feature vs adapter crate for the cluster layer, with compile-time and dependency measurements.
 
-## v0.8.0 - Advance
+## v0.7.0 - Advance
 Exit: second R&D round complete; every benchmark re-run; every gate passes; stretch (2.0) factor reported per benchmark.
 - [ ] Re-read the field (new papers, new competitor releases); new RESEARCH entries.
 - [ ] Re-measure competitors at their latest releases; targets updated upward if they improved.

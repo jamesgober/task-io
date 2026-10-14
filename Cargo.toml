@@ -16,10 +16,10 @@ license = "Apache-2.0 OR MIT"
 readme = "README.md"
 
 # Description
-description = "Task runtime for Rust: spawn async tasks, blocking work, and actors on one work-stealing scheduler, with supervision, timers, durable jobs, and distributed dispatch. Dependency-free."
+description = "Task runtime for Rust: async tasks, blocking work, and CPU fork-join on one work-stealing scheduler, with timers, monitors, durable jobs, and distributed dispatch. Dependency-free."
 
 # Keywords (5 max)
-keywords = ["runtime", "scheduler", "actor", "async", "task"]
+keywords = ["runtime", "scheduler", "async", "task", "jobs"]
 
 # Categories
 categories = ["concurrency", "asynchronous"]

@@ -18,7 +18,7 @@
 
 <div align="left">
     <p>
-        <strong>task-io</strong> is where work runs. One scheduler runs async tasks, blocking calls, CPU fork-join work, and actors on the same set of worker threads, with timers, cancellation, panic isolation, and supervision built in. On top of that come durable jobs (delayed, recurring, retried, dead-lettered, idempotent) and, later, dispatch of tasks, actors, and jobs across nodes.
+        <strong>task-io</strong> is where work runs. One scheduler runs async tasks, blocking calls, and CPU fork-join work on the same set of worker threads, with timers, cancellation, panic isolation, and monitors built in. On top of that come durable jobs (delayed, recurring, retried, dead-lettered, idempotent) and, later, dispatch of tasks and jobs across nodes.
     </p>
     <p>
         It is built to beat every existing runtime on its own benchmarks by at least 20%, with the harness, the workloads, and the numbers published in the repository. Being slower than another library on any of them blocks a release.
@@ -43,10 +43,10 @@
 | Tasks | `spawn` for async tasks, `spawn_blocking` for blocking calls, `join` and `scope` for CPU fork-join, `spawn_local` for thread-local tasks, all on one pool |
 | Scheduler | work stealing ordered by CPU topology (cores, CCDs, NUMA nodes), zero-allocation spawn in steady state, tickless idle, bounded fairness |
 | Time | timer wheel: `sleep`, `interval`, `timeout`, deadlines; never early |
-| Safety | panics caught at the task boundary, every queue and mailbox bounded, typed errors, shutdown with a deadline |
-| Actors | typed mailboxes, `tell` and `ask`, supervision trees (one-for-one, one-for-all, rest-for-one), links, monitors |
+| Safety | panics caught at the task boundary, every queue and channel bounded, typed errors, shutdown with a deadline |
+| Monitors | one exit notice per task with the cause (completed, cancelled, panicked), the base for supervisors built on top |
 | Jobs | delay, cron, retry with backoff and jitter, dead letters, idempotency keys, priority lanes, leases, pluggable durable store |
-| Cluster | remote spawn of registered task types, remote actors, distributed jobs, authenticated peers only (later phase) |
+| Cluster | remote spawn of registered task types, distributed jobs, authenticated peers only (later phase) |
 | Testing | a deterministic simulation mode: replay any interleaving from a seed, for task-io and for your code |
 
 <br>
@@ -71,6 +71,7 @@ The final API is locked in `0.2.0` and documented in [`docs/API.md`](./docs/API.
 
 ## What is not here
 
+- **Actors and spawns:** separate crates built on task-io (`actor-io`, `spawn-io`, planned). task-io runs the work; they define how work is organized and supervised.
 - **Sockets and the IO reactor:** they live in <a href="https://github.com/jamesgober/net-io"><code>net-io</code></a>, which plugs into task-io's driver seam so IO wakes tasks with no extra thread.
 - **A storage engine:** durable jobs use a pluggable store; the durable one is backed by a separate storage crate.
 - **Consensus and the wire protocol between nodes:** the cluster layer uses `raft-io` and `rpc-io` through traits.

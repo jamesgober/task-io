@@ -12,7 +12,7 @@ This library is built to a production standard and treated as a flagship. It is 
 
 ## 1. What this is
 
-task-io owns spawning, task memory, the scheduler, timers, cancellation, panic isolation, supervision, actors, durable jobs, and distributed dispatch. It does not own sockets, a reactor, file IO, a storage engine, consensus, or a wire protocol. See `PLAN.md` section 3 for the full in/out list and where each excluded piece lives.
+task-io owns spawning, task memory, the scheduler, timers, cancellation, panic isolation, monitors, durable jobs, and distributed dispatch. Actors and spawns are separate crates built on it (`actor-io`, `spawn-io`). It does not own sockets, a reactor, file IO, a storage engine, consensus, or a wire protocol. See `PLAN.md` section 3 for the full in/out list and where each excluded piece lives.
 
 ---
 
@@ -21,7 +21,7 @@ task-io owns spawning, task memory, the scheduler, timers, cancellation, panic i
 - **Ours, not rented.** No third-party runtime dependency. OS calls `std` lacks go through our own FFI declarations in `sys/`. Dev-only tooling (`criterion`, `proptest`, `loom` under `cfg(loom)`) is allowed. Competitor crates live only in `compare/`.
 - **Unsafe is fenced.** `unsafe` only inside `raw/` (task memory), `queue/` (lock-free structures), and `sys/` (OS calls). Every block has a `// SAFETY:` comment stating the invariants, how the local code establishes them, and the platform contract (man page or Microsoft documentation) it relies on. Every `unsafe fn` has a `# Safety` section. `#![deny(unsafe_op_in_unsafe_fn)]` everywhere. Every module with `unsafe` has a `loom` model (for anything concurrent) and runs clean under Miri. Everything else is `#![deny(unsafe_code)]`. Until those modules exist the crate is `#![forbid(unsafe_code)]`.
 - **Performance is a contract.** No change lands without the benchmarks it touches, run by the `BENCHMARKS.md` protocol. No "faster" claim without numbers. Allocation-free hot paths; no lock on the spawn, wake, or poll path; no shared atomic written on every poll.
-- **Bounded everything.** Every queue, mailbox, timer set, store, and retry loop has a limit, checked before memory is committed. No unbounded growth under any load.
+- **Bounded everything.** Every queue, channel, timer set, store, and retry loop has a limit, checked before memory is committed. No unbounded growth under any load.
 - **The runtime never dies from user code.** Panics are caught at the task boundary. A worker thread exits only at shutdown.
 - **Hostile-input hardening.** Job payloads and cluster messages are untrusted: size limits before allocation, fuzzed decoders, typed decode errors, no reachable panics, fail closed.
 - **Cross-platform.** Linux, macOS, and Windows are first-class, verified by CI on stable and MSRV 1.85. Platform differences are documented per feature in `docs/PLATFORM-NOTES.md`.
@@ -77,11 +77,10 @@ Each one has at least one test, named after it, that would fail if it broke.
 - After `shutdown(deadline)` returns: no user code runs, every task has reached an end state, every future and output has been dropped, and the thread count is back to the count before the runtime started.
 - Dropping a runtime from inside one of its own tasks is detected and returns an error; it never deadlocks.
 
-**Actors**
-- Messages from one sender to one actor are delivered in send order.
-- A full mailbox makes the sender wait or returns `Full`; it never grows past its limit.
-- System messages are delivered even when the user mailbox is full.
-- A supervisor's restart intensity is never exceeded without escalation.
+**Monitors and channels**
+- A monitor receives exactly one exit per monitored task, with the cause; monitoring an ended task delivers its exit at once.
+- Messages from one sender on one channel are received in send order.
+- A full channel makes the sender wait or returns `Full`; it never grows past its limit.
 
 **Jobs**
 - A job acknowledged as durable is never lost, including across a crash at any point.
