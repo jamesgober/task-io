@@ -22,12 +22,12 @@ The scaffold and the plan. No functional code yet.
 - Crate manifest (edition 2024, MSRV 1.85, no dependencies), `Apache-2.0 OR MIT`
   license, README, REPS, CI (Linux, macOS, Windows on stable and 1.85; audit
   and deny), `deny.toml`, `clippy.toml`, `rustfmt.toml`, `.gitattributes`.
-- `dev/PLAN.md`: purpose, consumers, layers, scope, the mandates (performance,
-  stability, simplicity, testing), planned architecture (task memory, scheduler,
-  topology, kinds of work, scopes, timers, monitors, jobs, cluster, driver seam,
-  simulation, and what spawn-io and actor-io need from task-io), planned API,
-  failure model, security responsibilities, ecosystem, open decisions, and the
-  decision log.
+- `dev/PLAN.md`: purpose, consumers, the pipeline, scope, the mandates
+  (performance, stability, simplicity, testing), planned architecture (jobs,
+  workers, lanes, delays and cron, failure handling, idempotency and leases,
+  stores, events, the executor seam, simulation, dispatch across nodes),
+  planned API, failure model, security responsibilities, ecosystem, open
+  decisions, and the decision log.
 - `dev/BENCHMARKS.md`: the performance contract. Workloads, competitors,
   measurement protocol, reference hosts, and the 1.20 gate.
 - `dev/RESEARCH.md`: the R&D program, the idea register, and the reading list.

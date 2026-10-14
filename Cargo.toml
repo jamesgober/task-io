@@ -16,13 +16,13 @@ license = "Apache-2.0 OR MIT"
 readme = "README.md"
 
 # Description
-description = "Task runtime for Rust: async tasks, blocking work, and CPU fork-join on one work-stealing scheduler, with timers, monitors, durable jobs, and distributed dispatch. Dependency-free."
+description = "Task dispatch pipeline for Rust: workers, priority lanes, delays, cron, retries, dead letters, idempotency keys, leases, and durable stores, then dispatch across nodes. Dependency-free."
 
 # Keywords (5 max)
-keywords = ["runtime", "scheduler", "async", "task", "jobs"]
+keywords = ["jobs", "queue", "scheduler", "workers", "task"]
 
 # Categories
-categories = ["concurrency", "asynchronous"]
+categories = ["concurrency"]
 
 # Links
 homepage      = "https://github.com/jamesgober/task-io"
@@ -63,8 +63,8 @@ default = []
 # DEPENDENCIES
 # #################################
 [dependencies]
-# None. The scheduler, task memory, queues, timers, and the OS calls they
-# need (thread parking, CPU topology, affinity) are all in this crate.
+# None. The workers, queues, timer wheel, and the OS calls they need
+# (thread parking, CPU topology, affinity) are all in this crate.
 
 
 # DEV DEPENDENCIES

@@ -4,7 +4,7 @@
 >
 > **Read order:** [`../REPS.md`](../REPS.md) (portfolio standard) -> [`DIRECTIVES.md`](./DIRECTIVES.md) (engineering law for this crate) -> **this file** -> [`BENCHMARKS.md`](./BENCHMARKS.md) (the performance contract) -> [`RESEARCH.md`](./RESEARCH.md) (the R&D program) -> [`ROADMAP.md`](./ROADMAP.md) (phases and exit criteria).
 >
-> **Status:** scaffold, `0.1.0`. R&D and design lock is `0.2.0`. Everything in sections 5 and 6 is the **planned** shape; `0.2.0` either confirms each part with measurements or replaces it, and records why in section 14.
+> **Status:** scaffold, `0.1.0`. R&D and design lock is `0.2.0`. Sections 5 and 6 are the **planned** shape; `0.2.0` either confirms each part with measurements or replaces it, and records why in section 14.
 
 ---
 
@@ -29,18 +29,24 @@
 
 ## 1. Purpose
 
-task-io is the place where work runs. Anything in the portfolio that wants something done concurrently hands it to task-io: an async task, a blocking call, a CPU-heavy fork-join computation, a job that has to survive a crash, or, later, work that should run on another node. Actors (`actor-io`) and spawns (`spawn-io`) are separate crates built on top of it (D-015).
+task-io is the task dispatch pipeline. Code hands it a unit of work, a **job** (a registered handler name plus a payload), and task-io makes sure the job runs: on a worker, in priority order, when it is due, retried when it fails for a temporary reason, set aside with the reason when it fails for good, never run twice under the same idempotency key, kept across a crash when the store is durable, and, later, run on another node.
+
+**Workers** are task-io's own threads. They sit in place and pull jobs until there are none left. They are simple on purpose: a worker is a thread that runs a handler, so a handler can do anything a thread can do (files, sockets, blocking calls) without special APIs.
 
 It owns:
 
-- spawning, and the memory every task lives in,
-- the scheduler: worker threads, run queues, work stealing, parking and waking, CPU topology,
-- timers, deadlines, and cancellation,
-- panic isolation, and monitors that tell a supervisor when and why a task ended,
-- durable jobs: delayed, recurring, retried, dead-lettered, idempotent,
-- distributed dispatch: placing tasks and jobs on other nodes (later phase).
+- the worker pool and how workers are placed, parked, and woken,
+- bounded priority lanes, fair scheduling between lanes and tenants, back-pressure,
+- delayed jobs, jobs at a time, and cron schedules,
+- retries with backoff and jitter, temporary vs permanent failure, the dead-letter queue,
+- idempotency keys, leases with fencing tokens,
+- the store: in memory, or durable through a pluggable store,
+- job events (enqueued, started, completed, retried, dead-lettered) for logs, metrics, and supervisors,
+- dispatch across nodes (later phase).
 
-The goal is not to be another runtime. The goal is to be the fastest, most stable, and simplest task runtime available in any language, measured, with the numbers published. Section 4 turns that into hard rules.
+It is single-purpose. It is not a general async runtime, an actor system, or a spawn framework (section 3.2).
+
+The goal: the fastest and most dependable job pipeline available in any language, measured, with the numbers published. Section 4 turns that into hard rules.
 
 ---
 
@@ -48,35 +54,35 @@ The goal is not to be another runtime. The goal is to be the fastest, most stabl
 
 ### 2.1 Who uses it
 
-Every consumer below already exists or is planned, and each one has written down what it needs. These are the real use cases the design is checked against.
-
 | Consumer | What it needs from task-io | Where it is written |
 |---|---|---|
 | Web stack (`serve-net`, `web-net`, `gate-net`) | background jobs: emails, cleanup, session-expiry sweeps; a local job queue and cron first, distribution later | `_strategy/WEB-STACK-DELIVERABLES.md` section 7 |
-| `smtp-net` | queuing, retries with backoff, and dead letters for outgoing mail; smtp-net classifies failures as temporary or permanent and task-io acts on it | `net-collection/smtp-net/dev/PLAN.md` |
-| Hive DB executor (`hive-exec`) | a core scheduler that drives parallel query execution; scans split into morsels with locality hints (NUMA node, shard); engines spawn no threads of their own; work stealing and fair scheduling | `Hive DB/planning/engine-boundary/01d-interface-requirements.md` REQ-035; `hive-exec/.dev/PLANNING.md` 0.8.0 |
-| LexerSketch runtime | a scheduler component for languages whose concurrency model is threads, tasks (async), or actors; `spawn` in a script binds to it; no rented dependencies | `lang-collection/_lexersketch/ARCHITECTURE.md` section 7; `NEW-LIBS.md` |
-| `service-kernel` | supervised workers, watchdog, circuit breaker; today these sit on tokio | `service-kernel/src/worker` |
-| `net-io` | a place to run connection handlers; its reactor (0.5.0) wakes tasks through task-io's driver seam | `net-io/dev/PLAN.md` |
-| `store-io`, `raft-io`, `rpc-io` | completion handling and background work without each crate running its own threads | their plans |
-| `spawn-io` (planned) | the base for James's spawns: monitored tasks, exit causes, deadlines, placement, blocking work, the job store as a mission ledger | `_strategy/SPAWN-IO.md` section 5 |
-| `actor-io` (planned, if needed) | the base for message-only actors | `_strategy/SPAWN-IO.md` S-2 |
+| `smtp-net` | queuing, retries with backoff, and dead letters for outgoing mail; smtp-net classifies a failure as temporary or permanent, and task-io acts on it | `net-collection/smtp-net/dev/PLAN.md` |
+| `spawn-io` (planned) | a store it can use as a durable mission ledger; retries and dead letters for missions | `_strategy/SPAWN-IO.md` section 5 |
+| `service-kernel` | recurring and background work for services without each one running its own threads | `service-kernel/src/worker` |
 
-### 2.2 Layers
+### 2.2 The pipeline
 
 ```
-      application code, services, Hive DB, LexerSketch programs, spawn-io, actor-io
-                                   |
-   +----------------------------------------------------------------+
-   |  L3  cluster: remote spawn, distributed jobs                    |  0.6.0
-   |  L2  jobs: durable queue, delay, cron, retry, DLQ, idempotency  |  0.4.0
-   |  L1  core: tasks, scheduler, timers, cancellation, monitors     |  0.3.0
-   +----------------------------------------------------------------+
-        |  driver seam (trait)            |  storage seam (trait)   |  transport seam (trait)
-     net-io reactor                  memory / store-io          rpc-io + tls-net + raft-io
+ submit / submit_after / cron                                         events -> EventSink
+        |                                                                   ^
+        v                                                                   |
+  [ admission: size limit, idempotency key, quota ] --refused--> SubmitError |
+        |                                                                   |
+        v                                                                   |
+  [ store: memory | durable ] <-----------------------------------+        |
+        |                                                         |        |
+        +--> delayed? --> [ timer wheel ] --due--+                |        |
+        |                                        v                |        |
+        +--------------------------------> [ priority lanes, DRR ]        |
+                                                 |                |        |
+                                                 v                |        |
+                                   [ workers: lease -> run handler ]------+
+                                                 |
+                       ok -> complete | temporary -> retry (backoff) | permanent / exhausted -> DLQ
 ```
 
-Each layer only uses the public API of the layer below it. A user who only wants L1 pays nothing for L2 and L3: they are behind additive features and add no code, no memory, and no branches to L1's hot paths.
+Every arrow is bounded. Every state change of a job goes through the store, so a durable store makes the whole pipeline durable.
 
 ---
 
@@ -84,30 +90,31 @@ Each layer only uses the public API of the layer below it. A user who only wants
 
 ### 3.1 In scope
 
-- Spawning async tasks (`Future`), blocking closures, and CPU fork-join work on one scheduler.
-- Thread-local (`!Send`) tasks pinned to one worker.
-- Structured concurrency (scopes), cancellation, deadlines, join and select helpers.
-- A timer wheel: sleep, interval, deadline, timeout.
-- The synchronization primitives the runtime itself needs, made public: oneshot, bounded MPSC, broadcast, notify, semaphore, and a cancellation token.
-- Task monitors: exit notification with the cause, the base that supervisors in `spawn-io` and `actor-io` are built on.
-- Durable jobs with a pluggable store.
-- Distribution across nodes with a pluggable transport and membership.
-- A deterministic simulation mode for testing (section 5.15).
-- Observability hooks: counters, histograms, and task events, with no cost when no sink is attached.
+- A worker pool of OS threads with topology-aware placement, parking, and an elastic size (RESEARCH I-21).
+- Job registration by name; handlers are plain functions; payloads are bytes with a size limit.
+- Submission: now, after a delay, at a time, on a cron schedule; `submit` waits when full, `try_submit` fails fast.
+- Priority lanes and per-tenant quotas, scheduled by deficit round robin.
+- Retries: exponential backoff with full jitter, a cap, a retry budget per handler, and a classification of every failure as temporary or permanent.
+- Dead-letter queue with the reason and attempt history; replay from the DLQ.
+- Idempotency keys with a dedupe window.
+- Leases (visibility timeouts) with fencing tokens; work rescue for a handler that is stuck.
+- A `Store` trait; a memory store in the crate; a durable store through a first-party storage crate (O-5).
+- Job events through an `EventSink` trait; counters and histograms.
+- A deterministic simulation mode (seeded clock, worker interleaving, and store faults).
+- An `Executor` seam so async handlers can run on an external executor (no dependency).
+- Dispatch across nodes (0.6.0).
 
 ### 3.2 Out of scope, and where it goes
 
 | Not here | Where it lives | Why |
 |---|---|---|
-| Sockets, IO readiness, the reactor | `net-io` | net-io owns sockets; task-io exposes a driver seam it plugs into (D-004) |
-| File IO | `fsys` / `store-io` | blocking file IO runs as blocking work on task-io; the IO itself is theirs |
-| Storage engine for durable jobs | `store-io` (or memory) | task-io defines the store trait; it does not write a storage engine |
-| Consensus and membership | `raft-io` | task-io's cluster layer uses it through a trait |
-| Wire protocol and encryption between nodes | `rpc-io`, `tls-net` | same |
-| Logging and metrics backends | `log-io`, `metrics-lib` | task-io emits through a sink trait |
-| Application protocols, HTTP | the `-net` crates | not a runtime concern |
-| Spawns (spawner, missions, ledger, replacement, elastic replication) | `spawn-io` (planned) | James's design, built on task-io; see `_strategy/SPAWN-IO.md` |
-| Actors, mailboxes, supervision trees | `actor-io` (planned, if needed) | single responsibility: task-io runs work, it does not define programming models on top of it |
+| A general async executor (spawning futures, work stealing of tasks, fork-join, async scopes, wakers) | the executor crate (candidate `cycle-exec`, O-1); the design is saved in `_strategy/EXECUTOR-SEED/` | different purpose (`LIBRARIES.md` 3.2): in-process scheduling vs dispatch |
+| Spawns: spawner, missions, mission ledger, replacement, elastic replication | `spawn-io` (planned) | James's own design (`_strategy/SPAWN-IO.md`) |
+| Actors, mailboxes, supervision trees | `actor-io` (planned, if needed) | a programming model, not dispatch |
+| Sockets and the reactor | `net-io` | not dispatch |
+| A storage engine | `store-io` (durable store) | task-io defines the `Store` trait and tests every implementation; it does not write a storage engine |
+| Consensus, membership, transport between nodes | `raft-io`, `rpc-io`, `tls-net` | the cluster layer uses them through traits |
+| Logging and metrics backends | `log-io`, `metrics-lib` | they implement `EventSink` |
 
 ---
 
@@ -118,24 +125,25 @@ These are requirements, not goals. A release that misses any of them does not sh
 ### 4.1 Performance
 
 - **Faster than everything, by a margin.** On every benchmark in [`BENCHMARKS.md`](./BENCHMARKS.md), task-io's primary metric must beat the best competitor by a speedup factor of **at least 1.20** (20%), measured by the protocol in that file. The stretch target is 2.0. Losing to, or tying with, any competitor on any gated benchmark is a release blocker.
-- **Lowest overhead.** Steady-state spawn of a small task makes zero heap allocations. An idle runtime makes zero wakeups. Per-task memory beats every competitor by the same 1.20 factor.
+- **Lowest overhead.** Steady-state dispatch of a job with a small payload makes zero heap allocations. An idle pool makes zero wakeups. Memory per queued job beats every competitor by the same 1.20 factor.
 - **Tail latency is a first-class metric.** p99 and p99.9 are gated, not only p50.
 - **No regressions.** After a benchmark passes, a change that makes it more than 5% slower is rejected (REPS performance gate).
 
 ### 4.2 Stability and safety
 
-- **The runtime never dies because of user code.** A panic in a task or job is caught at the task boundary and returned as an error or reported to its monitor; the worker thread keeps running.
-- **Nothing is unbounded.** Every queue, channel, timer set, job store, and retry loop has a limit that is checked before memory is committed. Overload produces back-pressure or a typed rejection, never unbounded growth.
-- **No lost work.** A task reaches exactly one end state. A job that was acknowledged as durable is never lost, including across a crash at any instruction.
-- **Fail closed and fail visible.** Every error is typed, `#[non_exhaustive]`, and says what to do. No silent drops.
+- **The pool never dies because of a handler.** A panic in a handler is caught, classified as a failure, and retried or dead-lettered; the worker keeps running.
+- **Nothing is unbounded.** Every lane, delayed set, dedupe index, store, and retry loop has a limit that is checked before memory is committed. Overload produces back-pressure or a typed rejection, never unbounded growth.
+- **No lost jobs.** A job accepted by `submit` reaches exactly one end state (completed or dead-lettered), or stays pending. With a durable store, that holds across a crash at any instruction.
+- **Fail closed and fail visible.** Every error is typed, `#[non_exhaustive]`, and says what to do. Every failure of a job is recorded with its reason. Nothing is dropped silently.
 - **Proven, not hoped.** Every lock-free structure has a `loom` model; every `unsafe` block runs under Miri; every invariant in DIRECTIVES section 4 has a test that would fail if it broke.
 
 ### 4.3 Simplicity
 
-- **The first screen of the docs is three lines of code.** `Runtime::new()`, `spawn`, `block_on`. Correct defaults for every limit; a user who never opens the builder gets a safe, fast runtime.
+- **The first screen of the docs is four lines of code:** create the pool, register a handler, submit a job, shut down. Correct defaults for every limit.
+- **Handlers are plain functions.** No trait to implement for the common case.
 - **One way to do each thing.** No two public functions with overlapping jobs.
 - **Errors you can act on.** Each error variant names the limit or state that caused it.
-- **Three tiers.** Tier 1 (the defaults, a handful of functions) headlines the docs; Tier 2 (builders and knobs) is one click away; Tier 3 (seams for drivers, stores, and transports) is for crate authors.
+- **Three tiers.** Tier 1 (the defaults) headlines the docs; Tier 2 (builders and knobs) is one click away; Tier 3 (`Store`, `EventSink`, `Executor` seams) is for crate authors.
 
 ### 4.4 Testing
 
@@ -143,6 +151,7 @@ These are requirements, not goals. A release that misses any of them does not sh
 - Every concurrent structure: `loom` model plus stress tests on all three operating systems.
 - Every invariant: a property test or a deterministic-simulation test.
 - Every failure mode in section 7: a test that injects it.
+- Every store: the crash-at-every-step suite.
 - Every claim in a doc: a test or benchmark that proves it. Full list in section 11.
 
 ---
@@ -156,144 +165,105 @@ This is the starting design. R&D in `0.2.0` ([`RESEARCH.md`](./RESEARCH.md)) mea
 ```
 src/
   lib.rs          crate root, lints, Tier 1 re-exports
-  error.rs        Error, SpawnError, JoinError, ... (#[non_exhaustive])
-  runtime/        Runtime, Builder, Handle, context, shutdown
-  task/           task header, state word, JoinHandle, AbortHandle, waker vtable
-  raw/            (unsafe) task memory: size-class slabs, recycling, raw task pointers
-  sched/          workers, run queues, LIFO slot, stealing, parking, topology, budgets
-  queue/          (unsafe) lock-free queues: local ring deque, injector, MPSC, eventcount
-  time/           timer wheel, sleep, interval, timeout
-  sync/           oneshot, mpsc, broadcast, notify, semaphore, cancel token
-  scope/          structured concurrency
-  blocking/       blocking work, compensation workers
-  local/          !Send tasks
-  sim/            deterministic simulation scheduler (feature `sim`)
-  monitor/        task monitors and exit causes (the base for spawn-io and actor-io)
-  job/            (feature `job`) Job, queue, schedule, retry, DLQ, Store trait, memory store
-  cluster/        (feature or adapter crate, decided at 0.6.0) remote spawn, distributed jobs
-  observe/        counters, histograms, event sink trait
-  sys/            (unsafe) OS calls std lacks: topology, affinity, futex / WaitOnAddress
+  error.rs        Error, SubmitError, Fail, ... (#[non_exhaustive])
+  pool/           Pool, Builder, shutdown, worker threads, parking, elastic sizing
+  job/            Job, JobId, registry, payload, context passed to handlers
+  lane/           priority lanes, tenant quotas, deficit round robin
+  queue/          (unsafe) lock-free ring queues, eventcount
+  time/           timer wheel for delayed jobs; cron parser and next-fire calculation
+  retry/          backoff, jitter, retry budgets, failure classification
+  dlq/            dead-letter queue, replay
+  dedupe/         idempotency index with a time window
+  lease/          leases, fencing tokens, work rescue
+  store/          Store trait, memory store, the crash-test harness for implementations
+  event/          EventSink trait, job events, counters, histograms
+  exec/           Executor seam for async handlers
+  sim/            deterministic simulation (feature `sim`)
+  cluster/        (0.6.0; feature or adapter crate) dispatch across nodes
+  sys/            (unsafe) OS calls std lacks: CPU topology, affinity, futex / WaitOnAddress
 ```
 
-`unsafe` is allowed only in `raw/`, `queue/`, and `sys/` (DIRECTIVES section 2).
+`unsafe` is allowed only in `queue/` and `sys/` (DIRECTIVES section 2).
 
-### 5.2 The task
+### 5.2 A job
 
-- **One allocation per task, then none.** A task is a header plus the future plus the output slot, carved from a per-worker size-class slab. Freed tasks go back to the slab of the worker that freed them; slabs refill across workers in batches. Target: zero heap allocations per spawn in steady state for futures up to the largest inline size class (BENCHMARKS E-10).
-- **One state word.** Scheduling state, completion, cancellation, join interest, and the reference count live in one atomic word, so the common transitions (notified -> running -> idle, running -> complete) are one compare-and-swap each.
-- **Wakers without refcount churn.** `wake_by_ref` from the running worker does not touch the reference count; the vtable is static per task type.
-- **Exactly one end state.** Completed (output stored), cancelled, or panicked (payload stored). The output is dropped exactly once, on the thread that drops it.
+- **Identity:** a `JobId` (unique within the store, never reused), the handler name, and an optional idempotency key.
+- **Payload:** bytes, with a size limit checked at submit. Small payloads are stored inline in the job slot, so dispatching them allocates nothing (RESEARCH I-16).
+- **Metadata:** lane, tenant, attempt count, not-before time, deadline, lease token.
+- **State machine:** `Pending -> Leased -> (Completed | RetryWait -> Pending | DeadLettered)`. Every transition is one store operation. The memory store does it with one atomic write per transition on the hot path.
 
-### 5.3 The scheduler
+### 5.3 Workers
 
-- **One worker per core by default**, placed by topology (5.4). Each worker has a fixed-size local ring deque, a single-task LIFO slot for message-passing locality, and a timer wheel.
-- **Global injector** for spawns from outside the runtime, drained in batches.
-- **Work stealing:** steal half of a victim's queue; victims chosen nearest-first by topology (same core complex before another, same NUMA node before another).
-- **Parking:** a bounded number of searching workers; idle workers park on an eventcount so no wakeup is lost and no herd is woken. Spin briefly before parking only when measurement shows it pays (E-08 in RESEARCH).
-- **Fairness:** each poll runs on a budget; the LIFO slot is bounded so ping-pong pairs cannot starve the queue; the injector and timers are checked at a fixed interval.
-- **Tickless idle:** no periodic timer when nothing is due. An idle runtime uses zero CPU.
+- One worker per physical core by default, placed by topology (core complexes and NUMA nodes on Linux, Windows, and macOS through `sys/`).
+- A worker takes a **batch** of jobs per queue operation, not one, to cut contention (RESEARCH I-02).
+- Idle workers park on an eventcount: no lost wakeups, no thundering herd, zero CPU when idle (I-04, I-05).
+- **Elastic size:** the pool adds workers while throughput rises and removes them when it stops rising, between a floor and a cap (I-21, from the elastic-replication idea in `_strategy/SPAWN-IO.md` 4.7). Off by default until measurement proves it.
+- **Work rescue:** a watchdog sees a handler that runs past its deadline. Its lease expires, a spare worker takes over its lane, and the job is retried. When the stuck handler finally returns, its result is rejected by the fencing token (I-10).
 
-### 5.4 CPU topology and placement
+### 5.4 Lanes, fairness, back-pressure
 
-Topology is read at start through `sys/` (Linux sysfs, Windows `GetLogicalProcessorInformationEx`, macOS `sysctl`): cores, SMT siblings, L3 groups (AMD CCDs, Intel tiles), and NUMA nodes. It drives worker placement, steal order, and slab refill order. On the reference machine (Ryzen 9 9950X3D: two CCDs, one with 3D V-Cache), crossing CCDs costs far more than staying inside one, so related tasks are kept on one CCD unless load requires otherwise. Pinning is optional (Tier 2) because it hurts on shared hosts.
+- Each lane is a bounded queue. Lanes have weights. Workers pick lanes by deficit round robin, so a low-priority lane gets its share and is never starved, and aging lifts jobs that waited too long (I-19).
+- Per-tenant quotas inside a lane: one tenant cannot fill the pipeline.
+- Back-pressure: when a lane is full, `submit` waits (with a deadline) and `try_submit` returns `SubmitError::Full`.
 
-### 5.5 Kinds of work, one pool
+### 5.5 Time: delays and cron
 
-| Kind | API (planned) | How it runs |
-|---|---|---|
-| async task | `spawn(fut)` | polled by workers |
-| blocking call | `spawn_blocking(f)` | runs on a worker that is handed off: the worker's queue moves to a spare worker so async tasks keep running (Go-style handoff), and the spare count is capped |
-| CPU fork-join | `join(a, b)`, `scope(|s| ...)` | rayon-style: the second half is pushed to the local deque and run inline if nobody stole it; evaluated against heartbeat scheduling in RESEARCH I-04 |
-| thread-local | `spawn_local(fut)` | stays on one worker; no atomics on its hot path |
-| job | `jobs().enqueue(..)` (L2) | stored, then run as a task when due |
+- A hierarchical timing wheel holds delayed jobs, with O(1) insert and cancel and no global lock. A job moves to its lane when it is due; it never runs early.
+- Cron expressions are parsed once (fuzzed parser), and the next fire time is computed directly, so no schedule is scanned on each tick (I-17).
+- Tickless: no wakeup when nothing is due.
 
-One pool means one set of threads, one memory budget, one place to measure. If R&D shows a split pool wins a gated benchmark, the split is adopted and recorded.
+### 5.6 Failure handling
 
-### 5.6 Structured concurrency, cancellation, deadlines
+- A handler returns `Ok(())` or a `Fail`: `Fail::retry(reason)` (temporary) or `Fail::permanent(reason)`. A panic counts as temporary by default (configurable per handler).
+- Retry: exponential backoff with full jitter, capped, and a per-handler retry budget (a token bucket), so a broken downstream service cannot cause a retry storm (I-22).
+- Dead-letter queue: the job, every attempt's reason and time, and the final reason. Jobs can be inspected and replayed.
 
-- `scope` joins every child before it returns, so children may borrow from the parent. Blocking scopes are sound today; async scopes run into the scoped-task trilemma (a future can be leaked with `mem::forget`). RESEARCH I-10 decides the async design; nothing unsound ships.
-- Cancellation is cooperative and explicit: a `CancelToken` is passed down; aborting a task drops its future at the next await point; cancellation is never silent (the join returns `Cancelled`).
-- Deadlines attach to a task or scope; every blocking and waiting API in the crate takes one or inherits it.
+### 5.7 Idempotency and leases
 
-### 5.7 Timers
+- **Idempotency:** a job with a key is refused if the same key completed or is in flight within the dedupe window. The index is time-bucketed so memory is bounded and old buckets drop in O(1) (I-13).
+- **Leases:** a worker holds a lease with a fencing token while it runs a job. A result is committed only if the token is still current. This is what makes work rescue and, later, node failover safe (I-12).
+- **Delivery guarantee, stated precisely:** at-least-once execution, and at-most-once effect per idempotency key within the window. Exactly-once is not claimed, because it cannot be guaranteed for effects outside the store.
 
-Hierarchical timing wheel per worker (Varghese and Lauck), O(1) insert and cancel, coarse levels for far timers, lazy cancellation, and no global lock. Timers never fire early. Lateness and resolution are measured (BENCHMARKS T-01, T-02).
+### 5.8 Stores
 
-### 5.8 Channels and synchronization
+- `Store` trait covering every job state transition, designed so a durable implementation can group-commit (I-11).
+- Memory store in the crate: fastest, loses pending jobs on restart (documented).
+- Durable store through a first-party storage crate (O-5), with record checksums and optional encryption through `crypt-io`.
+- Every implementation must pass the same crash-at-every-step suite before it ships.
 
-The runtime needs oneshot (join results), bounded MPSC (work hand-off between tasks), notify (parking), and a semaphore (limits). They are written once, tuned for the scheduler (a send that wakes a receiver on the same worker uses the LIFO slot), and made public so users do not need another crate.
+### 5.9 Events and observability
 
-### 5.9 Monitors
+Every transition emits a job event to an `EventSink` (log-io and metrics-lib implement it; spawn-io can use it to watch missions). Per-worker counters with no shared atomics on the hot path; histograms merged on read. With no sink attached, the cost is one predictable branch (I-15).
 
-A monitor is how code above task-io learns that a task ended, and why, without polling. It is the one primitive every supervisor needs, so task-io provides it once and does not build supervisors itself.
+### 5.10 Executor seam
 
-- `monitor(&handle)` returns a receiver that gets exactly one `Exit` per monitored task: `Completed`, `Cancelled`, or `Panicked` (with the payload), plus the task id and the time it ended.
-- Any number of monitors per task; monitoring a task that already ended delivers its exit immediately.
-- The exit is delivered by the worker that finished the task, with no extra thread and no allocation on the task's hot path (RESEARCH I-13).
-- Restart policies, mission ledgers, mailboxes, and supervision trees are not here; they live in `spawn-io` and `actor-io` (D-015).
+Handlers are synchronous by default and run on task-io's workers. An `Executor` trait lets an async handler run on an external executor (the future executor crate, O-1, or any other). task-io never depends on an executor, and the seam costs nothing when unused (I-20).
 
-### 5.10 What spawn-io and actor-io need from task-io
+### 5.11 Deterministic simulation
 
-James's spawn concept (spawner, missions, a mission ledger, instant replacement that resumes at the last committed step, elastic replication) is written down in `_strategy/SPAWN-IO.md`. It belongs to `spawn-io`, a separate crate built on task-io. Actors, if they are built, belong to `actor-io`. task-io's job is to give both of them what they need, so neither has to change task-io later:
+A `sim` feature replaces the clock, the worker interleaving, and store faults with a seeded, single-threaded version. The same seed replays the same run, so a bug found once can be replayed forever. task-io tests itself with it, and users can test their own handlers with it (I-14).
 
-| Need | task-io provides | Where |
-|---|---|---|
-| know when and why a spawn ended | monitors with the exit cause and panic payload | 5.9 |
-| replace a stuck spawn | abort, deadlines, timers for heartbeats and step budgets | 5.6, 5.7 |
-| spawns that use files and services | blocking work that never stalls async tasks | 5.5 |
-| keep a spawner's spawns close together | placement hints (core complex, NUMA node) | 5.4 |
-| talk between spawner and spawns | bounded channels | 5.8 |
-| a durable mission ledger | the job `Store` trait | 5.11 |
-| test replay at every step | the deterministic simulation mode | 5.15 |
+### 5.12 Dispatch across nodes (0.6.0)
 
-Any change to this list is agreed with James, because it shapes his design.
+- Membership and leases through `raft-io`; transport through `rpc-io` over `net-io` with `tls-net` mutual authentication; all behind traits.
+- Only registered, named, versioned job types run on a remote node; no code crosses the wire.
+- Leases fenced by the raft term, so a partitioned node's late result is rejected.
+- Placement by load and locality. Partitions, node loss, clock skew, message loss and duplication are tested with a Jepsen-style harness before the layer ships.
 
-### 5.11 Jobs (L2)
-
-- `Job` handlers are registered by name with a typed payload; payloads are bytes to the store, decoded by the handler.
-- Enqueue now, after a delay, at a time, or on a cron schedule.
-- Retries with exponential backoff and full jitter, a cap, and a classification hook (temporary vs permanent, which smtp-net needs).
-- Dead-letter queue with the reason and attempt history.
-- Idempotency keys with a dedupe window: running the same key twice inside the window is refused.
-- Priority lanes scheduled by deficit round robin, so low priority work is slower but never starved.
-- Leases (visibility timeouts) with fencing tokens, so a job whose worker stalled is retried and the stale worker's late result is rejected.
-- A `Store` trait. A memory store ships in the crate. A durable store uses a first-party storage crate (O-6). Every store implementation must pass the same crash-test suite (kill at every step).
-- Delivery guarantee, stated precisely: **at-least-once execution, at-most-once effect per idempotency key within the window.** Exactly-once is not claimed because it cannot be guaranteed for effects outside the store.
-
-### 5.12 Distribution (L3)
-
-- Membership and leases through `raft-io`; transport through `rpc-io` over `net-io` with `tls-net` (mutual authentication); all behind traits.
-- Remote spawn runs only **registered** task types, named and versioned; no code or closures cross the wire.
-- Distributed jobs with leases fenced by the raft term.
-- Placement by load and locality; work moves to idle nodes in batches.
-- Partitions, node loss, and clock skew are tested with a Jepsen-style harness before the layer ships (0.6.0).
-
-### 5.13 Driver seam (IO)
-
-task-io does not do IO. It exposes a `Driver` trait: on park, a worker asks the driver for ready events with a timeout instead of sleeping, so a reactor (net-io's epoll, kqueue, IOCP, or io_uring) wakes tasks with no extra thread and no extra hop. Without a driver, workers park on the eventcount.
-
-### 5.14 Observability
-
-Per-worker counters (no shared atomics on the hot path), sampled histograms (poll time, queue wait, steal count), and task lifecycle events delivered to an `EventSink` trait. With no sink attached, the cost is one predictable branch; BENCHMARKS measures the cost with a sink attached.
-
-### 5.15 Deterministic simulation
-
-A `sim` feature replaces the scheduler, clock, and randomness with a single-threaded, seeded version. The same seed replays the same interleaving, so a race found once can be replayed forever. task-io uses it to test itself, and users get it to test their own code (FoundationDB and TigerBeetle use this approach; none of the runtimes in BENCHMARKS offers it built in).
-
-### 5.16 Limits and defaults (proposed, finalized at 0.2.0)
+### 5.13 Limits and defaults (proposed, finalized at 0.2.0)
 
 | Limit | Default | Guards against |
 |---|---|---|
 | workers | one per physical core | oversubscription |
-| live tasks | 1,048,576 | memory exhaustion from a spawn loop |
-| local queue | 256 per worker (power of two) | memory per worker; steal granularity |
-| injector batch | 32 | external spawn contention |
-| poll budget | 128 operations per poll | one task starving others |
-| spare (handoff) workers | equal to workers | thread explosion from blocking work |
-| channel | 1,024 messages | a slow receiver holding unbounded memory |
-| timers | 1,048,576 per runtime | timer floods |
-| job retries | 10, backoff capped at 1 hour | retry storms |
-| dedupe window | 24 hours | duplicate effects |
+| lane capacity | 65,536 jobs per lane | memory exhaustion from a submit loop |
+| payload size | 64 KiB | one job holding large memory |
+| inline payload | 64 bytes | allocation on the hot path |
+| delayed jobs | 1,048,576 | timer floods |
+| retries | 10, backoff capped at 1 hour | retry storms |
+| retry budget | 10% of a handler's recent attempts | storms against a failing downstream |
+| dedupe window | 24 hours, bounded entries | duplicate effects; memory |
+| lease | 30 s, renewed by long handlers | a stuck handler holding a job forever |
+| DLQ | 1,048,576 entries, oldest evicted to the sink first | unbounded dead letters |
 
 Every default is measured in `0.2.0`, and each one is written down in `docs/API.md` along with the reason for its value.
 
@@ -303,56 +273,55 @@ Every default is measured in `0.2.0`, and each one is written down in `docs/API.
 
 This is the planned shape. `docs/API.md` locks it at `0.2.0`.
 
-**Tier 1: the defaults.**
+**Tier 1.**
 
 ```rust
-use task_io::Runtime;
+use std::time::Duration;
+use task_io::{Fail, Job, Pool};
+
+fn send_email(job: &Job) -> Result<(), Fail> {
+    let msg = decode(job.payload()).map_err(Fail::permanent)?;  // bad input never retries
+    smtp_send(&msg).map_err(Fail::retry)?;                        // network errors retry
+    Ok(())
+}
 
 fn main() -> Result<(), task_io::Error> {
-    let rt = Runtime::new()?;                       // one worker per core, safe limits
-    let answer = rt.block_on(async {
-        let a = task_io::spawn(async { 20 });
-        let b = task_io::spawn_blocking(|| 22);     // never stalls async tasks
-        Ok::<_, task_io::Error>(a.await? + b.await?)
-    })?;
-    assert_eq!(answer, 42);
+    let pool = Pool::new()?;                                  // one worker per core, safe limits
+    pool.register("send_email", send_email)?;
+    pool.submit("send_email", b"...")?;                       // waits when full
+    pool.submit_after("send_email", Duration::from_secs(30), b"...")?;
+    pool.cron("0 3 * * *", "sweep_sessions", b"")?;
+    pool.shutdown(Duration::from_secs(10))?;                  // finish or hand back, then stop
     Ok(())
 }
 ```
 
-**Monitors.**
+**Tier 2.**
 
 ```rust
-let handle = task_io::spawn(work());
-let exit = task_io::monitor(&handle);              // exactly one Exit per task
-match exit.recv().await? {
-    Exit::Completed(_) => {}
-    Exit::Panicked { id, payload, .. } => restart(id, payload),
-    Exit::Cancelled(_) => {}
-}
-```
+let pool = Pool::builder()
+    .workers(8)
+    .lane("critical", 8)        // weight 8
+    .lane("bulk", 1)
+    .store(my_durable_store)
+    .build()?;
 
-**Jobs (L2).**
-
-```rust
-rt.jobs().register("send_email", send_email)?;
-rt.jobs()
-    .enqueue("send_email", payload)
-    .after(Duration::from_secs(30))
-    .key(idempotency_key)
+pool.job("send_email", payload)
+    .lane("critical")
+    .key(order_id)              // idempotency key
+    .deadline(Duration::from_secs(5))
     .submit()?;
-rt.jobs().cron("0 3 * * *", "cleanup_sessions")?;
 ```
 
 **Questions 0.2.0 must answer with evidence, with the current recommendation:**
 
 | Question | Recommendation | Deciding evidence |
 |---|---|---|
-| What does `spawn` do when the live-task limit is reached? | `spawn` waits for capacity in async context; `try_spawn` returns `SpawnError::Full`; outside async context `spawn` returns `SpawnError::Full` | no unbounded growth (4.2), simplest correct behavior |
-| What does `task_io::spawn` do outside a runtime? | returns a handle that resolves to `JoinError::NoRuntime`; never panics | no reachable panics |
-| Does dropping a `JoinHandle` detach or cancel? | detach (like `std::thread`), with `scope` as the structured alternative | least surprise for users coming from std and tokio |
-| Does a monitor see the output value, or only the cause? | only the cause and the task id; the output goes to the `JoinHandle` | one owner per value, no clone on exit |
-| Free functions (`task_io::spawn`) vs handle methods only | both: free functions use the current runtime context, `Handle` methods for code outside it | Tier 1 brevity |
+| Is the main type `Pool`? | `Pool` (O-7) | reads as what it is |
+| How long does `submit` wait when a lane is full? | up to the job's deadline (default 1 s), then `SubmitError::Full`; `try_submit` never waits | bounded, no reachable hang |
+| Typed payloads? | bytes in Tier 1; an optional `Codec` trait in Tier 2 | zero-copy for bytes; no serde dependency |
+| Is a panic temporary or permanent by default? | temporary, with the retry budget as the brake | most panics in handlers come from bad external state |
+| Async handlers before the executor crate exists? | the `Executor` trait only; no built-in executor | single purpose |
 
 ---
 
@@ -362,27 +331,29 @@ What can go wrong, and what task-io guarantees when it does.
 
 | Failure | Guarantee | Test |
 |---|---|---|
-| a task panics | the panic is caught at the task boundary; `JoinHandle` returns `JoinError::Panicked` with the payload; the worker keeps running | unit, S-03 panic storm |
-| a monitored task panics | every monitor receives `Exit::Panicked` with the payload, exactly once; what happens next is the supervisor's decision (spawn-io, actor-io) | monitor suite, E-13 |
-| a task blocks a worker without `spawn_blocking` | a watchdog detects a poll longer than the threshold, reports it, and moves that worker's queue to a spare worker | S-02 |
-| spawn loop / message flood / timer flood | limits refuse or delay new work before memory is committed | overload suite S-01 |
-| out of memory in an allocation the runtime makes | the runtime pre-reserves its own structures; a failed task allocation returns `SpawnError::Alloc` | fault-injecting allocator test |
-| process crash (kill -9, power loss) | acknowledged durable jobs survive; in-flight jobs are retried after their lease expires; no job runs twice under the same idempotency key inside the window | J-04, crash-at-every-step suite |
-| a node is lost or partitioned (L3) | its leases expire; work is re-placed; fencing tokens reject late results from the old owner | Jepsen-style suite |
-| shutdown with work in flight | `shutdown(deadline)` stops accepting work, lets running work finish until the deadline, then cancels the rest; when it returns no user code runs and all threads are joined | shutdown suite, E-11 |
-| `panic = "abort"` in the user's profile | panic isolation is impossible by definition; the docs say so; supervision then restarts at process level (`service-kernel`) | documented, one test with abort |
+| a handler panics | caught; recorded as a failure with the payload; retried or dead-lettered; the worker keeps running | unit, W-09 |
+| a handler hangs | its lease expires; work rescue moves its lane to a spare worker; the job is retried; the late result is rejected by the fencing token | W-10, lease suite |
+| a downstream service is down | temporary failures back off with jitter; the retry budget stops a storm; jobs end in the DLQ with every reason when retries run out | R-01, R-02 |
+| submit loop / timer flood / one tenant floods | limits and quotas refuse or delay new work before memory is committed | W-07, W-08 |
+| the same job is submitted twice with a key | the second is refused inside the window | K-01 |
+| out of memory in an allocation the pool makes | pool structures are pre-reserved; a failed allocation returns a typed error; no partial job is stored | fault-injecting allocator test |
+| process crash (kill -9, power loss) | memory store: pending jobs are lost (documented). Durable store: every accepted job survives; leased jobs are retried after their lease expires; no idempotency key commits twice | P-02, crash-at-every-step suite |
+| a corrupt record in a durable store | never runs; goes to the DLQ with the reason | corruption suite |
+| a node is lost or partitioned (0.6.0) | its leases expire; jobs are re-placed; fencing tokens reject late results | Jepsen-style suite |
+| shutdown with work in flight | `shutdown(deadline)` stops accepting jobs, lets running handlers finish until the deadline, returns unstarted jobs to the store, then stops; when it returns, every worker thread is joined | shutdown suite |
+| `panic = "abort"` in the user's profile | a handler panic ends the process; with a durable store, the job is retried after restart; the docs say so | one test with abort |
 
 ---
 
 ## 8. Security responsibilities
 
-- **Hostile input is the default.** Job payloads and cluster messages are untrusted bytes: size limits are checked before allocation, decoders are fuzzed, and decode errors are typed.
-- **No code over the wire.** Remote spawn only runs registered, named, versioned task types. A peer cannot make a node run anything it did not register.
-- **Authenticated peers only.** Cluster transport requires mutual authentication (`tls-net`). Membership changes are raft-committed.
-- **Integrity at rest.** Durable job records carry a checksum; a corrupt record goes to the dead-letter queue with the reason, never runs. Encryption at rest is available through `crypt-io` for stores that hold sensitive payloads.
-- **Isolation between tenants.** Per-tenant quotas (tasks, channels, jobs, CPU share through weighted lanes) so one tenant cannot starve another (Hive DB tenants, web stack users).
-- **No denial of service through the scheduler.** Every limit in 5.16 exists to cap what one caller can consume.
-- **Every security measure states its cost**, in latency and memory, measured; every performance shortcut states its security effect (from the stack-wide rule in `.claude/CLAUDE.md`).
+- **Hostile input is the default.** Payloads, cron expressions, durable records, and cluster messages are untrusted: size limits before allocation, fuzzed parsers and decoders, typed errors.
+- **No code over the wire.** Remote nodes run only registered, named, versioned job types.
+- **Authenticated peers only.** Cluster transport requires mutual authentication (`tls-net`); membership changes are raft-committed.
+- **Integrity and confidentiality at rest.** Durable records carry a checksum; a corrupt record never runs. Encryption at rest through `crypt-io` for stores that hold sensitive payloads (emails, tokens).
+- **Isolation between tenants.** Per-tenant quotas and weighted lanes so one tenant cannot starve another.
+- **No secrets in events by default.** Events carry ids, names, and reasons, not payloads, unless a sink opts in.
+- **Every security measure states its cost**, in latency and memory, measured; every performance shortcut states its security effect.
 
 ---
 
@@ -390,30 +361,26 @@ What can go wrong, and what task-io guarantees when it does.
 
 ### 9.1 task-io's own dependencies
 
-None at runtime. Dev-only tooling is allowed: `criterion` (benches), `proptest` (property tests), `loom` (only under `cfg(loom)`), and the competitor crates used for comparison live in a separate, unpublished `compare/` crate, never in task-io's own dependency graph (D-010).
+None at runtime. Dev-only tooling is allowed: `criterion`, `proptest`, `loom` (only under `cfg(loom)`). Competitor crates for comparison live in `compare/`, a separate unpublished crate, never in task-io's dependency graph (D-010).
 
 ### 9.2 First-party crates task-io works with
 
 | Crate | Relationship | When |
 |---|---|---|
-| `net-io` | implements task-io's `Driver` trait (task-io never depends on net-io) | 0.5.0 |
-| `store-io` | backs the durable job store (O-6) | 0.4.0 |
+| `store-io` | backs the durable store (O-5) | 0.4.0 |
+| `crypt-io` | encryption at rest for durable stores | 0.4.0 |
+| `log-io`, `metrics-lib` | implement `EventSink` | any |
+| `smtp-net` | uses task-io for mail jobs; classifies failures | 0.5.0 |
+| `service-kernel` | runs recurring service work on task-io | 0.5.0 |
+| the executor crate (O-1) | can run async handlers through the `Executor` seam; task-io never depends on it | when it exists |
+| `spawn-io` | uses task-io's store and events for its mission ledger | after 0.4.0 |
 | `raft-io`, `rpc-io`, `tls-net` | cluster membership, transport, authentication | 0.6.0 |
-| `log-io`, `metrics-lib` | implement the `EventSink` trait | any |
-| `service-kernel` | moves its supervised workers onto task-io | 0.5.0 |
-| `spawn-io`, `actor-io` | built on task-io's monitors, deadlines, channels, placement, and job store | after 0.4.0 |
-| `crypt-io` | encryption at rest for job stores | 0.4.0 |
-| `clock-lib` | considered for the mockable clock in `sim` | 0.2.0 decides |
 
-Any first-party dependency must be a published version, never a `path` dependency to a sibling repository (CI checks out each repository alone).
+Any first-party dependency must be a published version, never a `path` dependency to a sibling repository.
 
-### 9.3 Relationship to `cycle`
+### 9.3 Names
 
-`_strategy/CYCLE_STRATEGY.md` planned an async runtime as `cycle-*` components (`cycle-exec`, `cycle-time`, ...). None of them exist (`cycle-collection` is empty). task-io builds its executor and timer wheel itself and keeps them as separate internal modules with clean boundaries, so either can be extracted into a `cycle-*` crate later if a second consumer needs one without the rest (O-4).
-
-### 9.4 Names
-
-`task-forge` was planned as the in-process scheduler (`_strategy/LIBRARIES.md` 3.2). It was never built, and the name is taken on crates.io by another author (`task_forge`; crates.io treats `-` and `_` as the same). task-io covers in-process scheduling (D-002).
+`task-forge` was planned as the in-process scheduler (`LIBRARIES.md` 3.2). It was never built, and the name is taken on crates.io by another author (`task_forge`; crates.io treats `-` and `_` as the same). That role is now the executor crate (O-1).
 
 ---
 
@@ -424,11 +391,11 @@ Summary only; exit criteria live in [`ROADMAP.md`](./ROADMAP.md).
 | Version | Name | Delivers |
 |---|---|---|
 | 0.1.0 | Scaffold | repository, template, this plan, the performance contract, the R&D program |
-| 0.2.0 | R&D and design lock | competitor harness and baseline numbers, experiments with verdicts, the spawn model, public API locked in `docs/API.md` |
-| 0.3.0 | Core | tasks, scheduler, stealing, parking, topology, timers, cancellation, scopes, blocking handoff, local tasks, sync primitives, simulation mode |
-| 0.4.0 | Jobs | durable jobs, delay, cron, retry, DLQ, idempotency, lanes, leases, stores |
-| 0.5.0 | Integration | driver seam with net-io, Hive DB morsel scheduling, LexerSketch scheduler binding, service-kernel migration |
-| 0.6.0 | Cluster | remote spawn, distributed jobs, partition testing |
+| 0.2.0 | R&D and design lock | competitor harness and baselines, experiments with verdicts, public API locked in `docs/API.md` |
+| 0.3.0 | Local pipeline | workers, lanes, submit, back-pressure, delays, cron, retries, DLQ, idempotency, leases, work rescue, memory store, events, simulation |
+| 0.4.0 | Durable | `Store` final, durable store, group commit, checksums, encryption, crash-at-every-step |
+| 0.5.0 | Integration | web stack jobs, smtp-net, service-kernel, the `Executor` seam |
+| 0.6.0 | Cluster | dispatch across nodes, fenced leases by raft term, partition testing |
 | 0.7.0 | Advance | second R&D round; adopt what wins; all gates re-run |
 | 0.9.0 | Hardening | fuzzing, 72-hour soak, chaos, adversarial review, audit |
 | 1.0.0 | Stable | frozen after three consumers have run it in production |
@@ -438,17 +405,17 @@ Summary only; exit criteria live in [`ROADMAP.md`](./ROADMAP.md).
 ## 11. Testing and verification
 
 - **Unit and doc tests** for every public item, both `Ok` and every `Err` path. Naming: `test_<subject>_<condition>_<expected>`.
-- **`loom` models** for every lock-free structure and every state-word transition (`RUSTFLAGS="--cfg loom"`).
-- **Miri** for every module with `unsafe` (`cargo +nightly miri test`), including the slab, raw task pointers, and queues; Stacked and Tree Borrows both.
+- **`loom` models** for every lock-free structure and every job state transition in the memory store.
+- **Miri** for every module with `unsafe`.
 - **Sanitizers** on Linux nightly: ThreadSanitizer and AddressSanitizer on the stress suite.
-- **Property tests** (`proptest`): queue operations against a model, timer wheel against a sorted-list model, scheduler state machine against a model, job state machine against a model.
-- **Deterministic simulation:** thousands of seeds per CI run over the scheduler, monitors, and jobs; any failing seed becomes a permanent regression test.
-- **Stress tests** on Linux, macOS, and Windows: spawn storms, steal storms, wake races, shutdown under load, all with leak checks (tasks, threads, memory return to baseline).
-- **Fault injection:** a panicking future at every poll, a failing allocator, a store that fails or crashes at every step, a clock that jumps.
-- **Crash tests:** kill the process at every step of the job state machine; verify no acknowledged job is lost and no idempotency key runs twice.
-- **Fuzzing** for every decoder (job records, cluster messages).
+- **Property tests** (`proptest`): lanes against a model, DRR shares against the weights, the timer wheel against a sorted-list model, cron next-fire against a brute-force model, the job state machine against a model, the dedupe window against a model.
+- **Deterministic simulation:** thousands of seeds per CI run over workers, lanes, retries, leases, and store faults; any failing seed becomes a permanent regression test.
+- **Stress tests** on Linux, macOS, and Windows: submit storms, panic storms, stuck handlers, shutdown under load, with leak checks (threads and memory return to baseline).
+- **Fault injection:** a handler that panics at every point, a failing allocator, a store that fails or crashes at every step, a clock that jumps forward and backward.
+- **Crash tests:** kill the process at every step of the job state machine for every durable store; 0 lost jobs, 0 duplicate effects per key.
+- **Fuzzing:** the cron parser, the payload codec, durable record decoding, cluster messages.
 - **Benchmarks:** the full contract in [`BENCHMARKS.md`](./BENCHMARKS.md), gated.
-- **Edge cases tested, not assumed:** zero workers requested, one worker, more workers than cores, a limit of zero, a limit of `usize::MAX`, a future that is ready immediately, one that never completes, one that panics on drop, a waker cloned a million times, wake after completion, wake from a foreign thread, spawn during shutdown, drop of the runtime from inside a task, and recursive `block_on`.
+- **Edge cases tested, not assumed:** zero workers requested, one worker, more workers than cores, a limit of zero, a limit of `usize::MAX`, an empty payload, a payload of exactly the limit and one byte over, a handler that is not registered, a cron expression that never fires, a delay of zero and of `Duration::MAX`, a clock moved backward, shutdown during submit, submit during shutdown, a handler that submits jobs, a handler that calls `shutdown`, and the same key submitted from 32 threads at once.
 
 ---
 
@@ -458,19 +425,19 @@ These are James's calls. Each is written so it can be answered with one line.
 
 | Id | Question | Recommendation |
 |---|---|---|
-| O-1 | ~~Describe your spawn model.~~ Answered 2026-10-13: written in `_strategy/SPAWN-IO.md`; it belongs to `spawn-io` (D-015). Confirm the list of what task-io provides for it (section 5.10). | confirm the list |
+| O-1 | The general-purpose executor (async tasks, work stealing, fork-join) that was moved out of task-io: name it, and when to start it? The design is saved in `_strategy/EXECUTOR-SEED/`. | `cycle-exec`, as `CYCLE_STRATEGY.md` already plans; start when Hive DB's executor or LexerSketch needs it |
 | O-2 | Publish `0.1.0` to crates.io now to claim the `task-io` name? | yes; the name is free today and the scaffold builds clean |
-| O-3 | REPS says "MUST use tokio". task-io replaces tokio. Record task-io as an exception, or change the REPS rule portfolio-wide to "no rented runtime" (same question as net-io O-1)? | change REPS portfolio-wide |
-| O-4 | Keep the executor and timer wheel inside task-io, with extraction into `cycle-*` crates only when a second consumer needs them alone? | yes |
-| O-5 | If, after every experiment, one gated benchmark cannot reach the 1.20 factor, the release stays blocked. Confirm that only you can waive a single benchmark, in writing in section 14. | yes, keep the block |
-| O-6 | Durable job store: use `store-io` (first-party, published version) behind the `job` feature, or ship a small internal log? | `store-io` once its Submitter ships in a published version; memory store until then |
-| O-7 | Reference hardware for performance gates is this machine (Windows) and its WSL2 Ubuntu. Add a bare-metal Linux box and a Mac when available? | yes when available; until then Windows and WSL2 gate, macOS is reported only |
+| O-3 | REPS says "MUST use tokio". task-io uses its own threads and no runtime. Record task-io as an exception, or change the REPS rule portfolio-wide to "no rented runtime" (same question as net-io O-1)? | change REPS portfolio-wide |
+| O-4 | If, after every experiment, one gated benchmark cannot reach the 1.20 factor, the release stays blocked. Confirm that only you can waive a single benchmark, in writing in section 14. | yes, keep the block |
+| O-5 | Durable store: use `store-io` (first-party, published version), or ship a small internal log? | `store-io` once its Submitter ships in a published version |
+| O-6 | Reference hardware for the gates is this machine (Windows) and its WSL2 Ubuntu. Add a bare-metal Linux box and a Mac when available? | yes when available; until then Windows and WSL2 gate, macOS is reported only |
+| O-7 | Name of the main type: `Pool`? | `Pool` |
 
 ---
 
 ## 13. Ideas
 
-The idea register, with hypothesis, method, cost, and status for each, lives in [`RESEARCH.md`](./RESEARCH.md) section 4. Ideas that are adopted move into section 5 here with a decision in section 14; ideas that are dropped stay in RESEARCH with the evidence.
+The idea register, with hypothesis, method, cost, and status for each, lives in [`RESEARCH.md`](./RESEARCH.md) section 4. Adopted ideas move into section 5 with a decision in section 14; dropped ideas stay in RESEARCH with the evidence.
 
 ---
 
@@ -479,17 +446,17 @@ The idea register, with hypothesis, method, cost, and status for each, lives in 
 | Id | Date | Decision | Reason |
 |---|---|---|---|
 | D-001 | 2026-10-13 | Template aligned with net-io: edition 2024, MSRV 1.85, `Apache-2.0 OR MIT`, canonical `REPS.md`, `dev/` committed and `.dev/` private, no committed lockfile | portfolio consistency; the May scaffold (edition 2021, MSRV 1.75, Apache only, a stub REPS) was never published |
-| D-002 | 2026-10-13 | Scope is a task runtime (local scheduler, jobs, then distribution), not only distributed dispatch (actors and spawns moved out by D-015) | James asked for workers, actors, and his spawn model here; the web stack needs local jobs now; Hive DB REQ-035 and LexerSketch need a scheduler; nothing else in the portfolio provides one (`cycle` is paused, `task-forge` was never built and its name is taken) |
-| D-003 | 2026-10-13 | No tokio and no third-party runtime dependency; task-io is its own scheduler | ours, not rented; a runtime cannot beat tokio by depending on it (REPS exception pending O-3) |
-| D-004 | 2026-10-13 | Sockets and the reactor stay in net-io; task-io defines a `Driver` trait that net-io implements; task-io never depends on net-io | one-way dependencies; the protocol-free and IO-free split matches net-io D-006 |
-| D-005 | 2026-10-13 | One pool for async, blocking, CPU, local, and job work, with handoff for blocking work | one budget and fewer threads; to be confirmed or reverted by RESEARCH I-01 |
+| D-002 | 2026-10-13 | Scope is the task dispatch pipeline: workers, lanes, delays, cron, retries, DLQ, idempotency, leases, stores, then dispatch across nodes. Local first, distributed second | the original purpose (`LIBRARIES.md`: "distributed task dispatch"); the web stack needs a local job queue and cron first (`WEB-STACK-DELIVERABLES.md` 7); distribution needs a correct local pipeline under it |
+| D-003 | 2026-10-13 | No tokio and no third-party runtime dependency; workers are task-io's own threads | ours, not rented; a pipeline cannot beat the competitors by depending on them (REPS exception pending O-3) |
+| D-004 | 2026-10-13 | Handlers are plain functions running on worker threads; async handlers go through an `Executor` seam, never a bundled executor | single purpose; any handler can do blocking work safely |
+| D-005 | 2026-10-13 | Every job state change goes through the `Store` trait; the memory store is the default | one code path for memory and durable stores; crash guarantees come from the store |
 | D-006 | 2026-10-13 | Performance gate: primary metric at least 1.20 times the best competitor on every benchmark in BENCHMARKS.md, p99 included; a miss blocks the release; only James can waive | James's mandate: being slower than another library is failure |
-| D-007 | 2026-10-13 | The spawn model is James's design; agents do not invent it (updated by D-015: James described it, and it moves to spawn-io) | the idea is his; a guessed version would be built on sand |
-| D-008 | 2026-10-13 | Panics in user code are caught at the task boundary; the runtime and its workers never die from user code | stability mandate (4.2) |
-| D-009 | 2026-10-13 | `unsafe` only in `raw/`, `queue/`, and `sys/`; until those exist the crate is `#![forbid(unsafe_code)]` | small, auditable unsafe surface; each module gets loom and Miri coverage |
-| D-010 | 2026-10-13 | Competitor benchmarks live in `compare/`, a separate unpublished crate with its own `[workspace]`, never in task-io's dependency graph | keeps `cargo deny` and the published package clean of tokio, rayon, actix and the rest |
+| D-007 | 2026-10-13 | Delivery: at-least-once execution, at-most-once effect per idempotency key within the window; exactly-once is never claimed | it cannot be guaranteed for effects outside the store; claiming it would be false |
+| D-008 | 2026-10-13 | Handler panics are caught and treated as failures; workers never die from handler code | stability mandate (4.2) |
+| D-009 | 2026-10-13 | `unsafe` only in `queue/` and `sys/`; until those exist the crate is `#![forbid(unsafe_code)]` | small, auditable unsafe surface; loom and Miri coverage |
+| D-010 | 2026-10-13 | Competitor benchmarks live in `compare/`, a separate unpublished crate with its own `[workspace]`, never in task-io's dependency graph | keeps `cargo deny` and the published package clean |
 | D-011 | 2026-10-13 | Stability and safety mandates in section 4.2 are release blockers | James's mandate: fail-safe, error-hardened, no corners cut |
-| D-012 | 2026-10-13 | API simplicity mandate in section 4.3: three-line Tier 1, one way to do each thing | James's mandate |
-| D-013 | 2026-10-13 | Testing mandate in section 4.4 and section 11 | James's mandate: nothing untested, edge cases included |
-| D-014 | 2026-10-13 | `0.2.0` is an R&D phase with a written program (RESEARCH.md) and an innovation requirement: at least three capabilities no benchmarked competitor has, each proven by experiment | James asked for invention, not a copy of existing runtimes |
-| D-015 | 2026-10-13 | Actors move to `actor-io` and spawns to `spawn-io`, separate crates built on task-io; task-io keeps tasks, workers, jobs, and distribution, and adds monitors as the base for supervisors | James: task-io is a specific, single-purpose library; his spawn concept (`_strategy/SPAWN-IO.md`) is its own design; a smaller task-io ships sooner, and the web stack needs it soon |
+| D-012 | 2026-10-13 | API simplicity mandate in section 4.3 | James's mandate |
+| D-013 | 2026-10-13 | Testing mandate in sections 4.4 and 11 | James's mandate: nothing untested, edge cases included |
+| D-014 | 2026-10-13 | `0.2.0` is an R&D phase with a written program (RESEARCH.md) and an innovation requirement: at least three capabilities no benchmarked competitor has, each proven by experiment | James asked for invention, not a copy of existing designs |
+| D-015 | 2026-10-13 | task-io is single-purpose. The first draft of this plan (commit 68bbce3) widened it into a full runtime with an executor, actors, and a slot for James's spawn model; that is reverted. The executor design moves to a separate crate (O-1) and is saved in `_strategy/EXECUTOR-SEED/`; actors move to `actor-io`; spawns move to `spawn-io` (`_strategy/SPAWN-IO.md`) | James: the libraries are meant to be single-purpose; `LIBRARIES.md` 3.2 separates in-process scheduling from dispatch; a smaller task-io ships sooner, and the web stack needs it soon |
