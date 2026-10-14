@@ -19,6 +19,11 @@ pub fn resident_bytes() -> Option<u64> {
     imp::resident_bytes()
 }
 
+/// Number of OS threads in this process.
+pub fn thread_count() -> Option<usize> {
+    imp::thread_count()
+}
+
 /// One line describing the CPU, OS, and compiler.
 pub fn host_description() -> String {
     format!(
@@ -65,6 +70,10 @@ mod imp {
         Some(pages * 4096)
     }
 
+    pub fn thread_count() -> Option<usize> {
+        Some(std::fs::read_dir("/proc/self/task").ok()?.count())
+    }
+
     pub fn cpu_name() -> Option<String> {
         let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
         let line = info.lines().find(|l| l.starts_with("model name"))?;
@@ -84,11 +93,16 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use std::time::Duration;
-    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
     use windows_sys::Win32::System::ProcessStatus::{
         K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentProcessId, GetProcessTimes,
+    };
 
     fn ft(t: FILETIME) -> u64 {
         ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64
@@ -121,6 +135,31 @@ mod imp {
         // SAFETY: pseudo-handle as above; `pmc` is valid for `cb` bytes.
         let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) };
         (ok != 0).then_some(pmc.WorkingSetSize as u64)
+    }
+
+    pub fn thread_count() -> Option<usize> {
+        // SAFETY: documented use of the ToolHelp snapshot API: the handle is
+        // checked, `entry.dwSize` is set before the first call, and the
+        // handle is closed on every path.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            let me = GetCurrentProcessId();
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut n = 0;
+            let mut ok = Thread32First(snap, &mut entry);
+            while ok != 0 {
+                if entry.th32OwnerProcessID == me {
+                    n += 1;
+                }
+                ok = Thread32Next(snap, &mut entry);
+            }
+            CloseHandle(snap);
+            Some(n)
+        }
     }
 
     pub fn cpu_name() -> Option<String> {
@@ -157,6 +196,9 @@ mod imp {
         None
     }
     pub fn resident_bytes() -> Option<u64> {
+        None
+    }
+    pub fn thread_count() -> Option<usize> {
         None
     }
     pub fn cpu_name() -> Option<String> {

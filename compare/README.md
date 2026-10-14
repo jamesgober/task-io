@@ -12,7 +12,7 @@ cargo run --release -- all --host R1
 
 | Option | Meaning |
 |---|---|
-| `W-01` ... or `all` | suites to run |
+| `W-01` ... `W-13`, `D-01`, or `all` | suites to run |
 | `--host R1` | host id from BENCHMARKS section 2; names the results file |
 | `--quick` | smaller workloads for checking the harness; results go to `results/*-quick.md`, which is not committed and never used for gating |
 | `--only a,b` | run only these contenders |
@@ -30,9 +30,16 @@ Results are appended to `results/<date>-<host>.md` (committed) and the raw sampl
 | `rayon` | `rayon::ThreadPool::spawn` |
 | `threadpool` | `threadpool::ThreadPool::execute` |
 | `tokio-blocking` | `spawn_blocking` with the blocking pool capped at the worker count |
+| `crossbeam-bounded` | the same pool on a bounded channel of 65,536 slots (task-io's default lane capacity); refuses when full |
 | `tokio-spawn` | plain tokio tasks on that many worker threads; tokio's fastest path for short jobs, added to raise the bar |
+| `tokio-blocking-elastic` | `spawn_blocking` with tokio's default blocking pool (grows to 512 threads, retires idle ones after 10 s); the elastic baseline in W-12 and W-13 |
+| `apalis` | apalis with its in-memory backend, `concurrency(workers)`, parallelized onto a tokio runtime. **apalis-core 1.0.0's in-memory backend panics when a push races the worker** (`memory.rs:246`, `try_lock().unwrap()` on a sink both sides lock), so it runs only as a smoke check that records the failure; apalis on SQLite is planned for the durable suites |
+| `best-fixed` | crossbeam-pool at the fixed size that did best on W-12, found by a grid search |
+| `weighted-crossbeam` | one bounded channel per lane with a weighted pick (W-06; no pool has lanes) |
+| `heap-scheduler` | a scheduler thread over a `BinaryHeap` with a condvar, lazy cancellation, due jobs handed to crossbeam-pool (D-01) |
+| `tokio-timer` | one tokio task per delayed job awaiting `sleep_until`, cancelled by `abort` (D-01) |
 
-Job crates (apalis, fang, background-jobs) and the cron and delayed-job contenders are added with the suites that use them.
+Still to add: fang and background-jobs (they need serializable job types), apalis on SQLite for the durable and scheduled suites, and apalis-cron and tokio-cron-scheduler for D-02.
 
 ## How the measurements stay fair
 
@@ -45,5 +52,7 @@ Job crates (apalis, fang, background-jobs) and the cron and delayed-job contende
 
 ## Known limits
 
+- W-07 (tenant isolation) has no competitor, so it is measured on task-io only.
+- W-11 ranks only contenders that ran every accepted job before shutdown returned; tokio tasks and rayon drop or abandon queued work there, and are listed but cannot set the bar.
 - Context switches (W-05) are only exposed on Linux; on Windows the row says so.
 - Resident memory after a warm-up batch mostly reflects allocator reuse; the heap counter is the primary W-04 metric.

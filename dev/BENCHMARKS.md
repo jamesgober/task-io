@@ -54,10 +54,14 @@ Each results file records the exact CPU, OS build, kernel, power plan, disk (for
 |---|---|
 | crossbeam-pool | hand-rolled pool: `std::thread` workers on a `crossbeam-channel` MPMC queue |
 | rayon | `rayon::ThreadPool::spawn` |
-| tokio-blocking | `tokio::task::spawn_blocking` on the multi-thread runtime (its blocking pool grows and shrinks on its own, so it is the elastic baseline) |
+| crossbeam-bounded | crossbeam-pool on a bounded channel of 65,536 slots (task-io's default lane capacity); refuses when full |
+| tokio-blocking | `tokio::task::spawn_blocking` on the multi-thread runtime with the blocking pool capped at the worker count |
+| tokio-blocking-elastic | `spawn_blocking` with tokio's default blocking pool, which grows to 512 threads and retires idle ones after 10 s: the elastic baseline (W-12, W-13) |
+| tokio-spawn | plain tokio tasks on the worker threads, tokio's fastest path for short jobs |
+| weighted-crossbeam | one bounded crossbeam channel per lane with a weighted pick (W-06 only; no pool has lanes) |
 | best-fixed | crossbeam-pool at the fixed size that does best on that workload, found by a grid search after the fact (W-12 only: the bar an elastic pool must beat) |
 | threadpool | the `threadpool` crate |
-| apalis | apalis with its memory backend; with SQLite (WAL, `synchronous=FULL`) for durable rows; apalis-cron for cron |
+| apalis | apalis with its memory backend; with SQLite (WAL, `synchronous=FULL`) for durable rows; apalis-cron for cron. Finding (2026-10-14): apalis-core 1.0.0's memory backend panics when a push races the worker's `poll_ready` (`memory.rs:246`), so it cannot run under concurrent submission; the harness records that on every run until a release fixes it |
 | fang | fang with its fastest backend that runs locally |
 | background-jobs | the `background-jobs` crate with its memory storage |
 | tokio-cron | `tokio-cron-scheduler` (cron rows only) |
@@ -84,10 +88,10 @@ Columns: id, workload (exact), primary metric, statistics gated, competitors.
 | W-07 | 2 tenants; one floods at 10x capacity | p99 latency of the other tenant | **abs: within 2x of its unloaded p99** | none (no competitor has tenant quotas) |
 | W-08 | offered load at 2x capacity for 60 s | p99 latency of admitted jobs; peak memory | **abs: p99 within 2x of unloaded; memory bounded**; p99 vs competitors | crossbeam-pool (bounded and unbounded), rayon, tokio-blocking, apalis |
 | W-09 | 10% of handlers panic | completed jobs per second; workers lost | median; **abs: 0 workers lost** | crossbeam-pool with `catch_unwind`, rayon, tokio-blocking, threadpool |
-| W-10 | one handler blocks for 500 ms every second | p99 latency of all other jobs | p99 | crossbeam-pool, rayon, tokio-blocking, apalis |
-| W-11 | shutdown with a 10 s deadline and 1,000,000 queued jobs | time to stop; threads left | median; **abs: 0 threads left, 0 jobs lost with a durable store** | crossbeam-pool, rayon, tokio-blocking, apalis |
-| W-12 | load step: arrivals jump to 10x for 60 s, then drop back; run once with 1 ms blocking handlers (IO-like) and once with 100 us CPU handlers | p99 latency during the step; time to settle; time to retire the extra workers after the drop; worker-count reversals | p99, median, median; **abs: at most 2 reversals per step; no CPU-bound pool above the logical core count** | tokio-blocking, best-fixed |
-| W-13 | worker faults, injected one at a time: a handler that hangs, a handler that panics in a loop, a worker slowed on purpose, a worker thread ended outside shutdown | time to detect; time until a replacement worker runs jobs; jobs delayed past their deadline | p99; p99; median; **abs: 0 jobs lost, 0 duplicate commits** | tokio-blocking and crossbeam-pool where they recover at all (none detects a slow worker; noted) |
+| W-10 | one handler blocks for 500 ms every second, 100 us jobs at 85% load, 4 and 32 workers | p99 latency of all other jobs | p99 | crossbeam-pool, rayon, tokio-blocking, apalis |
+| W-11 | shutdown with a 10 s deadline and 1,000,000 queued jobs | time to stop with every accepted job run or handed back to the store; threads left | median; **abs: 0 threads left, 0 jobs lost** (a contender that drops queued jobs at shutdown is reported but cannot set the bar) | crossbeam-pool, rayon, tokio-blocking, apalis |
+| W-12 | load step: arrivals jump to 10x for 60 s, then drop back (base rate: 10% of 16 workers); run once with 1 ms blocking handlers (IO-like) and once with 100 us CPU handlers. Settled means every later 1 s window's p99 is within 1.2x (or 1 ms) of the p99 over the last third of the step | p99 latency during the step; time to settle; time to retire the extra workers after the drop; worker-count reversals | p99, median, median; **abs: at most 2 reversals per step; no CPU-bound pool above the logical core count** | tokio-blocking-elastic, best-fixed |
+| W-13 | worker faults, injected one at a time at 85% load of 1 ms jobs on 4 workers: a handler that hangs for 15 s, a handler that panics in a loop, a worker slowed on purpose, a worker thread ended outside shutdown | time to detect; time until a replacement worker runs jobs; jobs delayed past their deadline | p99; p99; median; **abs: 0 jobs lost, 0 duplicate commits** | crossbeam-pool, crossbeam-bounded, rayon, threadpool, tokio-blocking, tokio-spawn, tokio-blocking-elastic (none detects a slow worker or replaces a stuck one, except that tokio-blocking-elastic adds threads; noted) |
 | W-14 | W-01 at 32 workers with the controller and health records on, against a build with them compiled out | throughput cost of the controller | **abs: at most 1%** | none |
 
 ### 4.2 Delays and cron

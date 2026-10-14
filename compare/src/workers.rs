@@ -77,7 +77,7 @@ pub fn spin_for(d: Duration) {
     }
 }
 
-fn warm<C: Contender>(pool: &C, jobs: usize) {
+pub fn warm<C: Contender>(pool: &C, jobs: usize) {
     let latch = StripedLatch::new(jobs);
     for i in 0..jobs {
         pool.spawn(move || latch.count_down(i));
@@ -241,14 +241,14 @@ pub fn w03<C: Contender>(workers: usize, work: Duration) -> f64 {
 // W-04: memory per queued job.
 // ---------------------------------------------------------------------------
 
-struct Gate {
+pub struct Gate {
     open: Mutex<bool>,
     cv: Condvar,
     started: AtomicUsize,
 }
 
 /// Occupies every worker with a job that waits on a gate.
-fn block_workers<C: Contender>(pool: &C, workers: usize) -> &'static Gate {
+pub fn block_workers<C: Contender>(pool: &C, workers: usize) -> &'static Gate {
     let gate: &'static Gate = Box::leak(Box::new(Gate {
         open: Mutex::new(false),
         cv: Condvar::new(),
@@ -269,12 +269,13 @@ fn block_workers<C: Contender>(pool: &C, workers: usize) -> &'static Gate {
     gate
 }
 
-fn open(gate: &Gate) {
+pub fn open(gate: &Gate) {
     *gate.open.lock().expect("gate") = true;
     gate.cv.notify_all();
 }
 
 pub struct MemResult {
+    pub queued: usize,
     pub heap_bytes_per_job: f64,
     pub allocs_per_submit: f64,
     pub rss_bytes_per_job: Option<f64>,
@@ -283,20 +284,28 @@ pub struct MemResult {
 /// Memory held per queued job with a 64-byte payload, after a warm-up batch.
 pub fn w04<C: Contender>(workers: usize, jobs: usize) -> MemResult {
     let pool = C::start(workers);
+    // Workers are held at a gate, so a bounded contender fills up; submit
+    // without waiting and count only what it accepted.
     let submit_batch = |pool: &C| {
         let latch = StripedLatch::new(jobs);
+        let mut accepted = 0usize;
         for i in 0..jobs {
             let payload = [i as u8; 64];
-            pool.spawn(move || {
+            let ok = pool.try_spawn(move || {
                 black_box(&payload);
                 latch.count_down(i);
             });
+            if ok {
+                accepted += 1;
+            } else {
+                latch.count_down(i);
+            }
         }
-        latch
+        (latch, accepted)
     };
     // Warm-up batch so queues have grown to steady state.
     let gate = block_workers(&pool, workers);
-    let latch = submit_batch(&pool);
+    let (latch, _) = submit_batch(&pool);
     open(gate);
     latch.wait();
     // Measured batch.
@@ -304,18 +313,20 @@ pub fn w04<C: Contender>(workers: usize, jobs: usize) -> MemResult {
     let rss0 = crate::sys::resident_bytes();
     crate::alloc::start();
     let a0 = crate::alloc::snapshot();
-    let latch = submit_batch(&pool);
+    let (latch, accepted) = submit_batch(&pool);
     let a1 = crate::alloc::snapshot();
     crate::alloc::stop();
     let rss1 = crate::sys::resident_bytes();
     open(gate);
     latch.wait();
     pool.shutdown();
+    let n = accepted.max(1) as f64;
     MemResult {
-        heap_bytes_per_job: (a1.live_bytes - a0.live_bytes) as f64 / jobs as f64,
-        allocs_per_submit: (a1.allocs - a0.allocs) as f64 / jobs as f64,
+        queued: accepted,
+        heap_bytes_per_job: (a1.live_bytes - a0.live_bytes) as f64 / n,
+        allocs_per_submit: (a1.allocs - a0.allocs) as f64 / n,
         rss_bytes_per_job: match (rss0, rss1) {
-            (Some(a), Some(b)) => Some((b as f64 - a as f64) / jobs as f64),
+            (Some(a), Some(b)) => Some((b as f64 - a as f64) / n),
             _ => None,
         },
     }
