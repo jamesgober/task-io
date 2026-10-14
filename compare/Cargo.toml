@@ -1,0 +1,42 @@
+# Competitor benchmark harness for task-io (dev/BENCHMARKS.md, PLAN D-010).
+# Never published, never a dependency of task-io. It has its own workspace and
+# lockfile so competitor crates stay out of task-io's dependency graph.
+[package]
+name         = "task-io-compare"
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.85"
+publish      = false
+license      = "Apache-2.0 OR MIT"
+description  = "Benchmarks task-io's competitors by the protocol in dev/BENCHMARKS.md."
+
+[workspace]
+
+[[bin]]
+name = "compare"
+path = "src/main.rs"
+
+# Competitor versions are pinned exactly (BENCHMARKS section 3). Update them
+# only by re-running the baselines and committing the new results.
+[dependencies]
+crossbeam-channel = "=0.5.17"
+rayon             = "=1.12.0"
+threadpool        = "=1.8.1"
+tokio             = { version = "=1.53.3", features = ["rt-multi-thread", "time", "sync"] }
+hdrhistogram      = { version = "=7.6.0", default-features = false }
+
+# Measurement helpers (not contenders).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
+# Same settings for every contender (BENCHMARKS section 3).
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+panic         = "unwind"
+debug         = "line-tables-only"

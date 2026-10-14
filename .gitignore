@@ -9,6 +9,7 @@
 # Benchmark and fuzz output
 /compare/target/
 /compare/results/raw/
+/compare/results/*-quick.md
 /fuzz/target/
 /fuzz/corpus/
 /fuzz/artifacts/
@@ -24,3 +25,6 @@ Desktop.ini
 
 # Libraries do not commit the lockfile
 Cargo.lock
+
+# ...except the harness, whose competitor versions must stay pinned
+!/compare/Cargo.lock
