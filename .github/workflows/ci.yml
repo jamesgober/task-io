@@ -83,3 +83,21 @@ jobs:
               exit 1
             fi
           done
+
+  compare:
+    name: Compare harness builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compare
+      # The harness is a separate workspace with pinned competitor versions; it
+      # is only compiled and linted here, never run (gating runs happen on the
+      # reference hosts, dev/BENCHMARKS.md section 2).
+      - name: Clippy (compare)
+        working-directory: compare
+        run: cargo clippy --release --locked -- -D warnings

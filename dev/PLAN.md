@@ -468,7 +468,7 @@ Names are James's call (O-8).
 |---|---|---|---|
 | encryption adapter | `Sealer` | `crypt-io` | 0.4.0 |
 | store-io adapter | `Store` | `store-io` | after store-io publishes its Submitter |
-| cluster adapter | `Transport`, `Membership` | `net-io`, `rpc-io`, `tls-net`, `raft-io` | 0.6.0 |
+| cluster adapter (`task-io-cluster`) | `Transport`, `Membership` | `net-io`, `rpc-io`, `tls-net`, `raft-io` | 0.6.0 |
 | log and metrics sinks | `EventSink` | `log-io`, `metrics-lib` (in those crates or an adapter) | any |
 | executor adapter | `Executor` | the executor crate (O-1) | when it exists |
 
@@ -539,7 +539,7 @@ These are James's calls. Each is written so it can be answered with one line.
 | O-5 | ~~Durable store through store-io or an internal log?~~ Decided 2026-10-14: task-io's own durable log store, store-io as an optional adapter (D-018). | |
 | O-6 | Reference hardware for the gates is this machine (Windows) and its WSL2 Ubuntu. Add a bare-metal Linux box and a Mac when available? | yes when available; until then Windows and WSL2 gate, macOS is reported only |
 | O-7 | Name of the main type: `Pool`? | `Pool` |
-| O-8 | Names of the adapter crates (encryption, store-io, cluster). | `task-io-seal`, `task-io-store`, `task-io-cluster` |
+| O-8 | Names of the adapter crates. Cluster: answered 2026-10-14, `task-io-cluster` (D-021). Encryption and store-io: still open. | `task-io-crypt` (names what it plugs in, `crypt-io`), `task-io-store-io` (task-io already has its own stores, so `task-io-store` would mislead) |
 
 ---
 
@@ -573,3 +573,4 @@ The idea register, with hypothesis, method, cost, and status for each, lives in 
 | D-018 | 2026-10-14 | task-io ships its own durable log store (append-only, checksummed, group commit, crash recovery); store-io becomes an optional adapter | durability is task-io's core promise and must not wait on another crate or add a dependency (D-017) |
 | D-019 | 2026-10-14 | The controller is a core part of task-io from 0.3.0: health records, load signals, scaling between a floor and a cap with configurable thresholds, repair of stuck, slow, failing, and dead workers, on by default | James: the pool must monitor every worker and the pipeline load, spawn and retire workers, and repair failing ones, for enterprise, distributed, long-running pipelines under heavy load |
 | D-020 | 2026-10-14 | Handlers that must be killable run as isolated workers in child processes | a Rust thread cannot be killed safely; process isolation is the only true kill, and it keeps a crashing handler from taking the process down |
+| D-021 | 2026-10-14 | The cluster adapter crate is named `task-io-cluster` | James's choice (O-8); it bundles four crates (net-io, rpc-io, tls-net, raft-io) for one purpose, so it is named for the purpose |

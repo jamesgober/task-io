@@ -91,7 +91,7 @@ Exit: cluster benchmarks (BENCHMARKS 4.7, written before this phase starts) pass
 - [ ] Cluster workloads and competitors written into BENCHMARKS 4.7.
 - [ ] `Transport` and `Membership` seams final, with conformance suites.
 - [ ] In task-io: placement by load and locality, remote leases fenced by the membership term, failover, the job wire format (size-checked, fuzzed), per-node controllers.
-- [ ] Cluster adapter crate (separate, O-8): `Transport` over net-io, rpc-io, and tls-net with mutual authentication; `Membership` over raft-io.
+- [ ] `task-io-cluster` adapter crate (separate repository, D-021): `Transport` over net-io, rpc-io, and tls-net with mutual authentication; `Membership` over raft-io.
 - [ ] Registered, versioned job types; remote dispatch.
 
 ## v0.7.0 - Advance
