@@ -221,12 +221,17 @@ impl Report {
                         o.variant == r.variant && o.workers == r.workers && o.metric == r.metric
                     })
                     .collect();
+                // Experiments (task-io prototypes) never set the bar; only
+                // competitors can be Best.
                 let best = group
                     .iter()
+                    .filter(|o| !is_experiment(o.contender))
                     .filter_map(|o| o.rank_key().map(|k| (k, o.contender)))
                     .min_by(|a, b| a.0.total_cmp(&b.0))
                     .map(|(_, c)| c);
-                let mark = if best == Some(r.contender) && group.len() > 1 {
+                let mark = if is_experiment(r.contender) {
+                    "experiment"
+                } else if best == Some(r.contender) && group.len() > 1 {
                     "**Best**"
                 } else {
                     ""
@@ -331,4 +336,9 @@ fn today() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// task-io prototypes and builds are measured but never set the bar.
+pub fn is_experiment(contender: &str) -> bool {
+    contender.starts_with("proto-") || contender.starts_with("task-io")
 }

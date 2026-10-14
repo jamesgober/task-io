@@ -8,6 +8,7 @@ mod alloc;
 mod contenders;
 mod delayed;
 mod jobs;
+mod proto;
 mod report;
 mod stats;
 mod stress;
@@ -240,6 +241,17 @@ fn w04(o: &Opts, r: &mut Report) {
                 "",
                 m.allocs_per_submit,
             ));
+            if let Some(b) = C::reserved_bytes_per_slot() {
+                r.push(Row::single(
+                    "W-04",
+                    format!("{jobs} queued jobs, 64-byte payload"),
+                    C::NAME,
+                    w,
+                    "preallocated bytes per queue slot (count with heap bytes)",
+                    "B",
+                    b as f64,
+                ));
+            }
             if m.queued < jobs {
                 r.push(Row::single(
                     "W-04",
