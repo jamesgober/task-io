@@ -73,7 +73,10 @@ jobs:
         shell: bash
         run: |
           for flags in "" "--all-features" "--no-default-features"; do
-            deps=$(cargo tree -e normal --prefix none $flags | grep -v '^task-io v' | sort -u)
+            tree=$(cargo tree -e normal --prefix none $flags)
+            # grep exits 1 when it selects nothing (the passing case), so it
+            # must not run as a pipeline stage under `-o pipefail`.
+            deps=$(printf '%s\n' "$tree" | awk '!/^task-io v/' | sort -u)
             if [ -n "$deps" ]; then
               echo "runtime dependencies found ($flags):"
               echo "$deps"
