@@ -63,7 +63,7 @@ Each results file records the exact CPU, OS build, kernel, power plan, disk (for
 | threadpool | the `threadpool` crate |
 | apalis | apalis with its memory backend; with SQLite (WAL, `synchronous=FULL`) for durable rows; apalis-cron for cron. Finding (2026-10-14): apalis-core 1.0.0's memory backend panics when a push races the worker's `poll_ready` (`memory.rs:246`), so it cannot run under concurrent submission; the harness records that on every run until a release fixes it |
 | fang | fang with its fastest backend that runs locally |
-| background-jobs | the `background-jobs` crate with its memory storage |
+| background-jobs | the `background-jobs` crate with its memory storage. It is AGPL-3.0, so it is not added to `compare/` until James decides how to measure it (PLAN O-9) |
 | tokio-cron | `tokio-cron-scheduler` (cron rows only) |
 | heap-scheduler | hand-rolled delayed-job thread on a `BinaryHeap` and a condvar (delayed rows only) |
 
