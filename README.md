@@ -3,7 +3,7 @@
     <br>
     <b>task-io</b>
     <br>
-    <sub><sup>TASK RUNTIME</sup></sub>
+    <sub><sup>TASK DISPATCH PIPELINE</sup></sub>
 </h1>
 
 <div align="center">
@@ -18,15 +18,18 @@
 
 <div align="left">
     <p>
-        <strong>task-io</strong> is where work runs. One scheduler runs async tasks, blocking calls, CPU fork-join work, and actors on the same set of worker threads, with timers, cancellation, panic isolation, and supervision built in. On top of that come durable jobs (delayed, recurring, retried, dead-lettered, idempotent) and, later, dispatch of tasks, actors, and jobs across nodes.
+        <strong>task-io</strong> is the task dispatch pipeline. You hand it a job (a registered handler and a payload) and it makes sure the job runs: on a worker, in priority order, when it is due, retried with backoff when it fails for a temporary reason, set aside in a dead-letter queue with every reason when it fails for good, never twice under the same idempotency key, and kept across a crash when the store is durable. Later, jobs dispatch across nodes.
     </p>
     <p>
-        It is built to beat every existing runtime on its own benchmarks by at least 20%, with the harness, the workloads, and the numbers published in the repository. Being slower than another library on any of them blocks a release.
+        Workers are plain threads that pull jobs until there are none left, so a handler is a plain function that can do anything a thread can: files, sockets, blocking calls.
+    </p>
+    <p>
+        It is built to beat every existing job pipeline and worker pool on its own benchmarks by at least 20%, with the harness, the workloads, and the numbers published in the repository. Being slower than another library on any of them blocks a release.
     </p>
     <br>
     <hr>
     <p>
-        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). No dependencies: the scheduler, task memory, queues, timers, and the OS calls they need are all in this crate.
+        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). No dependencies: the workers, queues, timer wheel, and the OS calls they need are all in this crate.
     </p>
     <blockquote>
         <strong>Status: scaffold (<code>0.1.0</code>).</strong> No functional code yet. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the performance contract in <a href="./dev/BENCHMARKS.md"><code>dev/BENCHMARKS.md</code></a>, the R&amp;D program in <a href="./dev/RESEARCH.md"><code>dev/RESEARCH.md</code></a>, and the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>. <code>0.2.0</code> measures every competitor and locks the public API.
@@ -40,29 +43,37 @@
 
 | Area | Planned |
 |---|---|
-| Tasks | `spawn` for async tasks, `spawn_blocking` for blocking calls, `join` and `scope` for CPU fork-join, `spawn_local` for thread-local tasks, all on one pool |
-| Scheduler | work stealing ordered by CPU topology (cores, CCDs, NUMA nodes), zero-allocation spawn in steady state, tickless idle, bounded fairness |
-| Time | timer wheel: `sleep`, `interval`, `timeout`, deadlines; never early |
-| Safety | panics caught at the task boundary, every queue and mailbox bounded, typed errors, shutdown with a deadline |
-| Actors | typed mailboxes, `tell` and `ask`, supervision trees (one-for-one, one-for-all, rest-for-one), links, monitors |
-| Jobs | delay, cron, retry with backoff and jitter, dead letters, idempotency keys, priority lanes, leases, pluggable durable store |
-| Cluster | remote spawn of registered task types, remote actors, distributed jobs, authenticated peers only (later phase) |
-| Testing | a deterministic simulation mode: replay any interleaving from a seed, for task-io and for your code |
+| Workers | one per core by default, placed by CPU topology, parked with zero idle wakeups, optionally elastic |
+| Submit | now, after a delay, at a time, or on a cron schedule; waits when full, or fails fast with `try_submit` |
+| Lanes | weighted priority lanes and per-tenant quotas, deficit round robin, no starvation |
+| Failures | handlers return `Fail::retry` or `Fail::permanent`; panics are caught; backoff with full jitter; retry budgets |
+| Dead letters | every attempt's reason kept; inspect and replay |
+| Idempotency | keys with a dedupe window: the same key never commits twice inside it |
+| Leases | fencing tokens, so a stuck or partitioned worker's late result is rejected |
+| Stores | memory by default; a durable store with checksums and optional encryption |
+| Events | every job state change to an event sink for logs and metrics |
+| Testing | a deterministic simulation mode: replay any run from a seed |
+| Cluster | dispatch of registered job types across authenticated nodes (later phase) |
 
 <br>
 
 ## Planned API
 
 ```rust
-use task_io::Runtime;
+use std::time::Duration;
+use task_io::{Fail, Job, Pool};
 
-let rt = Runtime::new()?;
-let answer = rt.block_on(async {
-    let a = task_io::spawn(async { 20 });
-    let b = task_io::spawn_blocking(|| 22);
-    Ok::<_, task_io::Error>(a.await? + b.await?)
-})?;
-assert_eq!(answer, 42);
+fn send_email(job: &Job) -> Result<(), Fail> {
+    let msg = decode(job.payload()).map_err(Fail::permanent)?;
+    smtp_send(&msg).map_err(Fail::retry)?;
+    Ok(())
+}
+
+let pool = Pool::new()?;
+pool.register("send_email", send_email)?;
+pool.submit("send_email", b"...")?;
+pool.cron("0 3 * * *", "sweep_sessions", b"")?;
+pool.shutdown(Duration::from_secs(10))?;
 ```
 
 The final API is locked in `0.2.0` and documented in [`docs/API.md`](./docs/API.md).
@@ -71,8 +82,9 @@ The final API is locked in `0.2.0` and documented in [`docs/API.md`](./docs/API.
 
 ## What is not here
 
-- **Sockets and the IO reactor:** they live in <a href="https://github.com/jamesgober/net-io"><code>net-io</code></a>, which plugs into task-io's driver seam so IO wakes tasks with no extra thread.
-- **A storage engine:** durable jobs use a pluggable store; the durable one is backed by a separate storage crate.
+- **An async executor:** task-io's workers are threads. Async handlers can run on an external executor through a trait seam.
+- **Actors and spawns:** separate crates (planned). task-io dispatches jobs; it does not define a programming model on top of them.
+- **A storage engine:** the durable store is backed by a separate storage crate through the `Store` trait.
 - **Consensus and the wire protocol between nodes:** the cluster layer uses `raft-io` and `rpc-io` through traits.
 
 <hr>
