@@ -95,8 +95,7 @@ pub fn w01<C: Contender>(workers: usize, submitters: usize, jobs: usize) -> f64 
     let pool = C::start(workers);
     warm(&pool, 100_000);
     let latch = StripedLatch::new(jobs);
-    let secs;
-    if submitters <= 1 {
+    let secs = if submitters <= 1 {
         let t0 = Instant::now();
         for i in 0..jobs {
             pool.spawn(move || {
@@ -105,7 +104,7 @@ pub fn w01<C: Contender>(workers: usize, submitters: usize, jobs: usize) -> f64 
             });
         }
         latch.wait();
-        secs = t0.elapsed().as_secs_f64();
+        t0.elapsed().as_secs_f64()
     } else {
         let barrier = Barrier::new(submitters + 1);
         let mut measured = 0.0;
@@ -129,8 +128,8 @@ pub fn w01<C: Contender>(workers: usize, submitters: usize, jobs: usize) -> f64 
             latch.wait();
             measured = t0.elapsed().as_secs_f64();
         });
-        secs = measured;
-    }
+        measured
+    };
     pool.shutdown();
     secs
 }
