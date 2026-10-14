@@ -9,8 +9,12 @@
 //! nodes.
 //!
 //! Workers are plain threads, so a handler is a plain function that can do
-//! anything a thread can. task-io is not an async executor, an actor system,
-//! or a spawn framework; those are separate crates.
+//! anything a thread can. A controller watches every worker and the load on
+//! the pipeline, scales the pool between a floor and a cap, and repairs or
+//! replaces workers that are stuck, slow, or failing.
+//!
+//! task-io has zero dependencies. It is not an async executor, an actor
+//! system, or a spawn framework; those are separate crates.
 //!
 //! ## Status
 //!

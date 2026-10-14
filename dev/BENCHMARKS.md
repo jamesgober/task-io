@@ -54,7 +54,8 @@ Each results file records the exact CPU, OS build, kernel, power plan, disk (for
 |---|---|
 | crossbeam-pool | hand-rolled pool: `std::thread` workers on a `crossbeam-channel` MPMC queue |
 | rayon | `rayon::ThreadPool::spawn` |
-| tokio-blocking | `tokio::task::spawn_blocking` on the multi-thread runtime |
+| tokio-blocking | `tokio::task::spawn_blocking` on the multi-thread runtime (its blocking pool grows and shrinks on its own, so it is the elastic baseline) |
+| best-fixed | crossbeam-pool at the fixed size that does best on that workload, found by a grid search after the fact (W-12 only: the bar an elastic pool must beat) |
 | threadpool | the `threadpool` crate |
 | apalis | apalis with its memory backend; with SQLite (WAL, `synchronous=FULL`) for durable rows; apalis-cron for cron |
 | fang | fang with its fastest backend that runs locally |
@@ -85,6 +86,9 @@ Columns: id, workload (exact), primary metric, statistics gated, competitors.
 | W-09 | 10% of handlers panic | completed jobs per second; workers lost | median; **abs: 0 workers lost** | crossbeam-pool with `catch_unwind`, rayon, tokio-blocking, threadpool |
 | W-10 | one handler blocks for 500 ms every second | p99 latency of all other jobs | p99 | crossbeam-pool, rayon, tokio-blocking, apalis |
 | W-11 | shutdown with a 10 s deadline and 1,000,000 queued jobs | time to stop; threads left | median; **abs: 0 threads left, 0 jobs lost with a durable store** | crossbeam-pool, rayon, tokio-blocking, apalis |
+| W-12 | load step: arrivals jump to 10x for 60 s, then drop back; run once with 1 ms blocking handlers (IO-like) and once with 100 us CPU handlers | p99 latency during the step; time to settle; time to retire the extra workers after the drop; worker-count reversals | p99, median, median; **abs: at most 2 reversals per step; no CPU-bound pool above the logical core count** | tokio-blocking, best-fixed |
+| W-13 | worker faults, injected one at a time: a handler that hangs, a handler that panics in a loop, a worker slowed on purpose, a worker thread ended outside shutdown | time to detect; time until a replacement worker runs jobs; jobs delayed past their deadline | p99; p99; median; **abs: 0 jobs lost, 0 duplicate commits** | tokio-blocking and crossbeam-pool where they recover at all (none detects a slow worker; noted) |
+| W-14 | W-01 at 32 workers with the controller and health records on, against a build with them compiled out | throughput cost of the controller | **abs: at most 1%** | none |
 
 ### 4.2 Delays and cron
 
@@ -118,11 +122,12 @@ Columns: id, workload (exact), primary metric, statistics gated, competitors.
 
 | Id | Workload | Primary metric | Gated | Competitors |
 |---|---|---|---|---|
-| S-01 | 24 hours, mixed workload (W, D, R, K at once) | memory and thread-count drift after warm-up | **abs: zero drift** | none |
+| S-01 | 24 hours, mixed workload (W, D, R, K at once) with load cycles | memory, thread, handle, and latency drift after warm-up | **abs: zero drift** | none |
+| S-02 | 7 days on R2, mixed workload with daily load cycles from 0.1x to 3x capacity, durable store, injected faults at random | drift; controller repairs not caused by an injected fault or a handler | **abs: zero drift; 0 repairs caused by task-io itself** | none |
 
 ### 4.7 Cluster (0.6.0)
 
-Workloads are finalized in the `0.6.0` design and added here before that phase starts. Planned: remote dispatch latency and throughput, failover time after node loss, recovery after a partition heals, and 0 stale commits under the Jepsen-style suite. Competitors are chosen in that design from distributed job systems that run locally; Temporal and Sidekiq numbers are context only.
+Workloads are finalized in the `0.6.0` design and added here before that phase starts. Planned: remote dispatch latency and throughput, failover time after node loss, recovery after a partition heals, and 0 stale commits under the Jepsen-style suite. Planned competitors, run locally at the same durability and with authentication on: RabbitMQ through `lapin` (the stack it replaces, `LIBRARIES.md` section 6), NATS JetStream, and Redis Streams. Temporal and Sidekiq numbers are context only.
 
 ### 4.8 Moved out
 

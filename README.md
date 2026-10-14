@@ -21,7 +21,7 @@
         <strong>task-io</strong> is the task dispatch pipeline. You hand it a job (a registered handler and a payload) and it makes sure the job runs: on a worker, in priority order, when it is due, retried with backoff when it fails for a temporary reason, set aside in a dead-letter queue with every reason when it fails for good, never twice under the same idempotency key, and kept across a crash when the store is durable. Later, jobs dispatch across nodes.
     </p>
     <p>
-        Workers are plain threads that pull jobs until there are none left, so a handler is a plain function that can do anything a thread can: files, sockets, blocking calls.
+        Workers are plain threads that pull jobs until there are none left, so a handler is a plain function that can do anything a thread can: files, sockets, blocking calls. A controller watches every worker and the load on the pipeline: it adds workers when the load needs them and the hardware can use them, retires them when the load drops, and repairs or replaces a worker that is stuck, slow, or failing, without losing or duplicating a job.
     </p>
     <p>
         It is built to beat every existing job pipeline and worker pool on its own benchmarks by at least 20%, with the harness, the workloads, and the numbers published in the repository. Being slower than another library on any of them blocks a release.
@@ -29,7 +29,7 @@
     <br>
     <hr>
     <p>
-        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). No dependencies: the workers, queues, timer wheel, and the OS calls they need are all in this crate.
+        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). Zero dependencies, in every feature combination: the workers, the controller, queues, timer wheel, durable log store, and the OS calls they need are all in this crate. Encryption, TLS, and consensus plug in through traits from separate adapter crates.
     </p>
     <blockquote>
         <strong>Status: scaffold (<code>0.1.0</code>).</strong> No functional code yet. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the performance contract in <a href="./dev/BENCHMARKS.md"><code>dev/BENCHMARKS.md</code></a>, the R&amp;D program in <a href="./dev/RESEARCH.md"><code>dev/RESEARCH.md</code></a>, and the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>. <code>0.2.0</code> measures every competitor and locks the public API.
@@ -43,17 +43,19 @@
 
 | Area | Planned |
 |---|---|
-| Workers | one per core by default, placed by CPU topology, parked with zero idle wakeups, optionally elastic |
+| Workers | one per core at start, placed by CPU topology, parked with zero idle wakeups |
+| Controller | watches each worker's health and the pipeline load; scales between a floor and a cap with configurable thresholds; tells blocked workers from CPU-bound ones; repairs stuck, slow, failing, and dead workers; never on the job path |
+| Isolated workers | handlers that must be killable run in child processes, so a hang or crash can be stopped without touching the main process |
 | Submit | now, after a delay, at a time, or on a cron schedule; waits when full, or fails fast with `try_submit` |
 | Lanes | weighted priority lanes and per-tenant quotas, deficit round robin, no starvation |
 | Failures | handlers return `Fail::retry` or `Fail::permanent`; panics are caught; backoff with full jitter; retry budgets |
 | Dead letters | every attempt's reason kept; inspect and replay |
 | Idempotency | keys with a dedupe window: the same key never commits twice inside it |
 | Leases | fencing tokens, so a stuck or partitioned worker's late result is rejected |
-| Stores | memory by default; a durable store with checksums and optional encryption |
-| Events | every job state change to an event sink for logs and metrics |
+| Stores | memory by default; task-io's own durable log store with checksums, group commit, and crash recovery; encryption at rest through a seam |
+| Events | every job state change and controller action to an event sink; a health snapshot for dashboards |
 | Testing | a deterministic simulation mode: replay any run from a seed |
-| Cluster | dispatch of registered job types across authenticated nodes (later phase) |
+| Cluster | dispatch of registered job types across authenticated nodes, with fenced leases and failover (later phase) |
 
 <br>
 

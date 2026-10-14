@@ -1,6 +1,6 @@
 # task-io - Engineering Directives
 
-> Engineering standards and the definition of done for this project. Read alongside `REPS.md` (root, authoritative), [`PLAN.md`](./PLAN.md) (design and decisions), [`BENCHMARKS.md`](./BENCHMARKS.md) (the performance contract), [`RESEARCH.md`](./RESEARCH.md) (the R&D program), and [`ROADMAP.md`](./ROADMAP.md) (current phase). If anything here conflicts with `REPS.md`, `REPS.md` wins, except where `PLAN.md` records an approved exception.
+> Engineering standards and the definition of done for this project. Read alongside `REPS.md` (root, authoritative), [`PLAN.md`](./PLAN.md) (design and decisions), [`BENCHMARKS.md`](./BENCHMARKS.md) (the performance contract), [`RESEARCH.md`](./RESEARCH.md) (the R&D program), and [`ROADMAP.md`](./ROADMAP.md) (current phase). If anything here conflicts with `REPS.md`, `REPS.md` wins, except where `PLAN.md` records an approved exception. Approved exception: REPS's tokio rules do not apply (PLAN D-016); their intent (bounded concurrency, never blocking shared threads, cancellation) is kept with task-io's own means.
 
 ---
 
@@ -12,23 +12,26 @@ This library is built to a production standard and treated as a flagship. Jobs t
 
 ## 1. What this is
 
-task-io is the task dispatch pipeline: workers, lanes, delays, cron, retries, dead letters, idempotency, leases, stores, and later dispatch across nodes. It is single-purpose. It is not a general async executor, an actor system, or a spawn framework, and none of those may be added to it (PLAN D-015). It does not own sockets, a storage engine, consensus, or a wire protocol. See `PLAN.md` section 3 for the full in/out list and where each excluded piece lives.
+task-io is the task dispatch pipeline: workers and the controller that sizes and repairs them, lanes, delays, cron, retries, dead letters, idempotency, leases, stores, and dispatch across nodes. It is single-purpose. It is not a general async executor, an actor system, or a spawn framework, and none of those may be added to it (PLAN D-015). It does not own sockets, a storage engine, consensus, or a wire protocol. See `PLAN.md` section 3 for the full in/out list and where each excluded piece lives.
 
 ---
 
 ## 2. Engineering law (non-negotiable)
 
-- **Ours, not rented.** No third-party runtime dependency. OS calls `std` lacks go through our own FFI declarations in `sys/`. Dev-only tooling (`criterion`, `proptest`, `loom` under `cfg(loom)`) is allowed. Competitor crates live only in `compare/`.
+- **Zero dependencies.** No runtime dependency of any kind, in any feature combination, first-party crates included (PLAN D-017). Anything task-io does not implement itself is a trait here, implemented by an adapter crate that depends on task-io. OS calls `std` lacks go through our own FFI declarations in `sys/`. Dev-only tooling (`criterion`, `proptest`, `loom` under `cfg(loom)`) is allowed. Competitor crates live only in `compare/`. CI fails if the normal dependency tree is not empty.
+- **No home-made cryptography.** Encryption and authentication come through the `Sealer` and `Transport` seams from audited crates in adapters. Checksums (CRC-32C) are not cryptography and are ours.
 - **Unsafe is fenced.** `unsafe` only inside `queue/` (lock-free structures) and `sys/` (OS calls). Every block has a `// SAFETY:` comment stating the invariants, how the local code establishes them, and the platform contract (man page or Microsoft documentation) it relies on. Every `unsafe fn` has a `# Safety` section. `#![deny(unsafe_op_in_unsafe_fn)]` everywhere. Every module with `unsafe` has a `loom` model (for anything concurrent) and runs clean under Miri. Everything else is `#![deny(unsafe_code)]`. Until those modules exist the crate is `#![forbid(unsafe_code)]`.
 - **Performance is a contract.** No change lands without the benchmarks it touches, run by the `BENCHMARKS.md` protocol. No "faster" claim without numbers. Allocation-free dispatch for small payloads; no lock on the submit, dispatch, or complete path that a lock-free design can avoid; no shared atomic written on every job when a per-worker one works.
 - **Bounded everything.** Every lane, delayed set, dedupe index, store, DLQ, and retry loop has a limit, checked before memory is committed. No unbounded growth under any load.
-- **The pool never dies from handler code.** Panics are caught at the handler boundary. A worker thread exits only at shutdown or when the elastic pool shrinks.
+- **The pool never dies from handler code.** Panics are caught at the handler boundary. A worker thread exits only at shutdown, when the controller retires it, or when a retired stuck worker's handler finally returns.
+- **The controller stays off the hot path.** Workers only write their own health records; the controller reads them. No lock, no shared atomic, and no branch is added to the job path for the controller. Its decisions are rate-limited and bounded by the floor and cap.
+- **Obstructed-path rule** (`LIBRARIES.md` 4.3): no runtime configuration check on a hot path that a compile-time choice or a setup-time choice can replace.
 - **Every job is accounted for.** A job is pending, leased, completed, or dead-lettered. Nothing disappears.
 - **Hostile-input hardening.** Payloads, cron expressions, durable records, and cluster messages are untrusted: size limits before allocation, fuzzed parsers and decoders, typed decode errors, no reachable panics, fail closed.
 - **Cross-platform.** Linux, macOS, and Windows are first-class, verified by CI on stable and MSRV 1.85. Platform differences are documented per feature in `docs/PLATFORM-NOTES.md`.
 - **Error handling.** Every fallible path returns `Result`; error enums are `#[non_exhaustive]`, implement `std::error::Error`, carry the cause as a source, and say what to do.
 - **Production-ready.** `#![deny(missing_docs)]`; no `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!`, `dbg!`, or printing in library code; every public item has rustdoc with a runnable example; every claim in the docs maps to a test or a benchmark.
-- **Simple API.** Tier 1 is four lines. Handlers are plain functions. One way to do each thing. A new public item needs a reason in `docs/API.md`.
+- **Simple API.** Tier 1 is four lines, and the pool sizes and repairs itself with no configuration. Handlers are plain functions. One way to do each thing. A new public item needs a reason in `docs/API.md`.
 
 ---
 
@@ -69,6 +72,20 @@ Each one has at least one test, named after it, that would fail if it broke.
 - A handler panic never ends a worker thread.
 - Lane, delayed-set, dedupe, and DLQ sizes never exceed their limits.
 
+**Controller**
+- The live worker count is always within the floor and the cap; retired stuck workers count against the zombie cap and never exceed it.
+- A CPU-bound pool is never scaled past the logical core count.
+- The worker count changes at most at the configured rate, and never reverses within the cooldown.
+- Retiring or replacing a worker never loses, duplicates, or reorders the commit of a job: its leased jobs are finished, fenced, or re-queued.
+- Every controller action emits an event with the worker, the signal, the threshold, and the reason.
+- An idle pool, controller included, makes zero periodic wakeups.
+- If the controller fails, workers keep running jobs, and the controller is restarted.
+
+**Isolated workers**
+- A killed or crashed child never affects the parent process or other jobs; its job is retried under a new lease.
+- No frame from a child is decoded before its size is checked; children inherit no handles but their pipes.
+- After shutdown, no child process remains.
+
 **Time**
 - A delayed or cron job never runs before its time.
 - Lateness is bounded and documented per platform.
@@ -85,11 +102,12 @@ Each one has at least one test, named after it, that would fail if it broke.
 - A result whose lease token is no longer current is never committed.
 
 **Stores**
-- With a durable store, a job acknowledged by `submit` survives a crash at any point.
+- With a durable store, a job acknowledged by `submit` survives a crash or power loss at any point.
+- A failed write (disk full, I/O error) is reported to the submitter before acknowledgment; nothing half-written is ever acknowledged.
 - A corrupt record never runs; it goes to the DLQ with the reason.
 
 **Shutdown**
-- After `shutdown(deadline)` returns: no handler code runs, unstarted jobs are back in the store, and every worker thread is joined.
+- After `shutdown(deadline)` returns: no handler code runs on a joined worker, unstarted jobs are back in the store, every worker thread is joined or reported as a retired stuck thread, and no child process remains.
 
 **Cluster (0.6.0)**
 - A node runs only registered, versioned job types, and only from authenticated peers.

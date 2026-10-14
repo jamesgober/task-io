@@ -67,3 +67,16 @@ jobs:
         run: cargo audit
       - name: Deny
         run: cargo deny check
+      # task-io has zero runtime dependencies in every feature combination
+      # (dev/PLAN.md D-017). The normal dependency tree must be task-io alone.
+      - name: Zero dependencies
+        shell: bash
+        run: |
+          for flags in "" "--all-features" "--no-default-features"; do
+            deps=$(cargo tree -e normal --prefix none $flags | grep -v '^task-io v' | sort -u)
+            if [ -n "$deps" ]; then
+              echo "runtime dependencies found ($flags):"
+              echo "$deps"
+              exit 1
+            fi
+          done
