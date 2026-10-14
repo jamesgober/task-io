@@ -23,9 +23,11 @@ The scaffold and the plan. No functional code yet.
   license, README, REPS, CI (Linux, macOS, Windows on stable and 1.85; audit
   and deny), `deny.toml`, `clippy.toml`, `rustfmt.toml`, `.gitattributes`.
 - `dev/PLAN.md`: purpose, consumers, the pipeline, scope, the mandates
-  (performance, stability, simplicity, testing), planned architecture (jobs,
-  workers, lanes, delays and cron, failure handling, idempotency and leases,
-  stores, events, the executor seam, simulation, dispatch across nodes),
+  (performance, stability, simplicity, testing, zero dependencies), planned
+  architecture (jobs, workers, the controller that scales and repairs them,
+  isolated workers, lanes, delays and cron, failure handling, idempotency and
+  leases, the memory and durable log stores, events, seams, simulation,
+  dispatch across nodes),
   planned API, failure model, security responsibilities, ecosystem, open
   decisions, and the decision log.
 - `dev/BENCHMARKS.md`: the performance contract. Workloads, competitors,
@@ -33,6 +35,7 @@ The scaffold and the plan. No functional code yet.
 - `dev/RESEARCH.md`: the R&D program, the idea register, and the reading list.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md`.
 - `VERSION` constant and a smoke test.
+- CI check that the normal dependency tree is empty in every feature combination.
 
 [Unreleased]: https://github.com/jamesgober/task-io/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/jamesgober/task-io/releases/tag/v0.1.0

@@ -16,7 +16,7 @@ license = "Apache-2.0 OR MIT"
 readme = "README.md"
 
 # Description
-description = "Task dispatch pipeline for Rust: workers, priority lanes, delays, cron, retries, dead letters, idempotency keys, leases, and durable stores, then dispatch across nodes. Dependency-free."
+description = "Task dispatch pipeline for Rust: self-managing workers, priority lanes, delays, cron, retries, dead letters, idempotency keys, leases, and a durable store, then dispatch across nodes. Zero dependencies."
 
 # Keywords (5 max)
 keywords = ["jobs", "queue", "scheduler", "workers", "task"]
@@ -63,8 +63,10 @@ default = []
 # DEPENDENCIES
 # #################################
 [dependencies]
-# None. The workers, queues, timer wheel, and the OS calls they need
-# (thread parking, CPU topology, affinity) are all in this crate.
+# None, in every feature combination (dev/PLAN.md D-017). The workers, the
+# controller, queues, timer wheel, durable log store, and the OS calls they
+# need are all in this crate. Integrations are traits implemented by
+# separate adapter crates. CI fails if this table is ever non-empty.
 
 
 # DEV DEPENDENCIES
