@@ -330,6 +330,10 @@ macro_rules! for_each_contender {
             if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
         }
         {
+            type $c = $crate::survey::A3sLane;
+            if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
+        }
+        {
             // Experiment (dev/RESEARCH.md I-01, I-04, I-16, I-27, I-36):
             // measured alongside the competitors, never counted as one.
             type $c = $crate::proto::ProtoRing;

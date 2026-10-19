@@ -16,6 +16,8 @@
 8. [The store and the durable log](#8-the-store-and-the-durable-log)
 9. [Shutdown](#9-shutdown)
 10. [Isolated workers](#10-isolated-workers)
+11. [The `unsafe` map](#11-the-unsafe-map)
+12. [The `sys/` surface](#12-the-sys-surface)
 
 ---
 
@@ -52,7 +54,7 @@ Every step is bounded. A token mismatch at `complete`, `retry`, or `dead_letter`
 
 - A job lives in a fixed **slot**: a 16-byte header (id, attempt, lane, flags) and 64 bytes of inline payload; larger payloads are stored out of line and the slot holds a pointer. 80 bytes in all *(pending I-36)*.
 - Each lane is a bounded ring of slot indexes (a Vyukov MPMC ring), cache-line padded head and tail *(pending I-01, I-03)*.
-- Submitters write through a small per-thread staging buffer that is flushed in batches, so 32 submitters do not all hit the lane head *(pending I-35)*.
+- Submitters do not all write one ring tail: the lane's slots are split into per-submitter rings that workers drain in place, so no job waits on a flush. The quick `proto-shards` pass ran 32 submitters 6.1x faster than crossbeam-pool; the shard count and the ordering cost are still to be measured *(pending I-35, RESEARCH section 6)*.
 - With one lane (the default), workers read it directly: no DRR state, no branch on the hot path (`LIBRARIES.md` 4.3). With several, DRR picks the next lane by weight and deficit; aging lifts a job that waited past its bound.
 
 ## 4. Workers and parking
@@ -153,7 +155,7 @@ Every implementation, task-io's own and every adapter's, must also hold to these
   ```
 
   Types: `Put`, `Lease`, `Complete`, `Retry`, `DeadLetter`, `Expire`, `Checkpoint`.
-- **Group commit:** submits append to an in-memory buffer; the flusher writes the buffer and calls `sync_data` (plus `F_FULLFSYNC` on macOS, where `fsync` alone does not reach stable storage), then acknowledges every submit in that batch. The batch window adapts: a lone submit is flushed at once; under load, batches grow.
+- **Group commit:** submits append to an in-memory buffer; the flusher writes the buffer and calls `File::sync_data`, which is `fdatasync` on Linux, `fcntl(F_FULLFSYNC)` on macOS (where `fsync` alone does not reach stable storage), and `FlushFileBuffers` on Windows (read in the std source for 1.95; to re-check against 1.85 at the lock), then acknowledges every submit in that batch. The batch window adapts: a lone submit is flushed at once; under load, batches grow.
 - **Recovery:** read segments from the last checkpoint; a record whose length runs past the end of the file, or whose CRC does not match, ends recovery for that segment (a torn tail from a crash) and is truncated; a bad record in the middle of a segment is reported, its job goes to the DLQ, and recovery continues with the next valid record.
 - **Compaction:** a checkpoint record lists live jobs; segments wholly before the last checkpoint are deleted.
 - **Encryption:** with a `Sealer`, the payload and fields are sealed before the CRC is computed over the sealed bytes, so corruption is caught before decryption.
@@ -193,3 +195,60 @@ Every implementation, task-io's own and every adapter's, must also hold to these
 - Parent and child talk over two pipes with length-prefixed frames (size-checked, fuzzed): `Run(job)`, `Done(id, result)`, `Heartbeat`.
 - The controller treats children like workers: a hung child is killed (`TerminateProcess` / `kill`) and replaced; a crashed child's job is retried under a new lease.
 - Children inherit no handles but their pipes *(pending I-25)*.
+
+## 11. The `unsafe` map
+
+`unsafe` lives only in `queue/` and `sys/` (DIRECTIVES section 2). Everything `std` already does safely is taken from `std`: flushing (`File::sync_data`), killing a child (`Child::kill`), the CPU count under cgroup quotas and affinity (`available_parallelism`), and raw thread and process handles (`AsRawHandle`, `JoinHandleExt::as_pthread_t`). This table is the complete planned list; anything added later is added here first, with its test.
+
+### 11.1 `queue/`
+
+| Id | Operation | Invariant | How the code establishes it | Proof |
+|---|---|---|---|---|
+| Q-1 | Read and write a ring cell (`UnsafeCell<MaybeUninit<Slot>>`) | only the thread that owns a position touches its cell: a producer after winning the tail CAS while `seq == pos`, a consumer after winning the head CAS while `seq == pos + 1`; each hands the cell over with a `Release` store of `seq` that the next owner reads with `Acquire` | Vyukov's bounded MPMC protocol, as in `compare/src/proto.rs` | loom: 2 producers and 2 consumers on rings of 2 and of 4 cells, every interleaving; Miri on the unit tests |
+| Q-2 | Store a closure inline (`ptr::write` into a 64-byte, 16-aligned buffer) and run or drop it through a function pointer | the `call` and `drop` pointers are instantiated for the same `F` that was written; exactly one of them runs, once; a closure that does not fit (size or alignment) is boxed and the buffer holds its pointer | `SmallJob::new` picks the path and both pointers together; `run` and `drop` consume `self` | Miri with drop-counting, panicking, zero-sized, and over-aligned closures (the boxed path); a job dropped at shutdown runs its `drop`, never its `call` |
+| Q-3 | `unsafe impl Send for SmallJob`, `unsafe impl Sync` for the ring | a `SmallJob` is built only from `F: Send`; ring cells are shared only under Q-1 | the constructor's bound; Q-1 | `compile_fail` doctests: a non-`Send` closure does not submit (no dev-dependency needed) |
+| Q-4 | Out-of-line payloads (`Box::into_raw`, `Box::from_raw`) | the raw pointer is owned by exactly one slot at a time and freed exactly once, by `run` or `drop` | part of Q-2's single consumption | Miri leak check over the shutdown and drop paths |
+
+The idle mask, the searching count, the health records, and the timer wheel are plain atomics and indexes: no `unsafe`. Parking goes through `std::thread::park` unless I-04 or I-34 measures a gain from parking on a word directly; then the call is in `sys/` (S-W4, S-L4, S-M4) and the protocol keeps its loom model.
+
+### 11.2 `sys/`
+
+Each OS call is wrapped in a safe function that checks the return code (a failure becomes `io::Error::last_os_error()`, never a panic), sizes every buffer before the call, and never reads past the length the OS reports or past the buffer, whichever is smaller. Every `// SAFETY:` comment names the documentation listed in section 12. Each wrapper has a test on its OS in CI. A function missing on an older OS version (S-W5, S-M4) is resolved at run time and falls back; it is never assumed.
+
+## 12. The `sys/` surface
+
+Planned FFI declarations per OS, with the documentation each relies on. A pending item names the experiment that decides whether the call is needed at all.
+
+### 12.1 Windows (`kernel32`, and the `api-ms-win-core-synch-l1-2-0` API set)
+
+| Id | Need | Function | Reference |
+|---|---|---|---|
+| S-W1 | topology: cores, SMT siblings, caches, processor groups | `GetLogicalProcessorInformationEx(RelationAll, buf, &mut len)`: a first call with a null buffer returns `ERROR_INSUFFICIENT_BUFFER` and the length; records are variable-size, and each record's `Size` is bounds-checked before it is read | Microsoft Learn, "GetLogicalProcessorInformationEx", "SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX" |
+| S-W2 | pin or place a worker *(pending I-06)* | `SetThreadGroupAffinity(GetCurrentThread(), &GROUP_AFFINITY, null)` (hard); `SetThreadIdealProcessorEx` (hint) | Microsoft Learn, "SetThreadGroupAffinity", "SetThreadIdealProcessorEx" |
+| S-W3 | per-thread CPU time for the controller | `GetThreadTimes` on the worker's `JoinHandle` raw handle: kernel and user time in 100 ns units, updated at the scheduler tick, so coarse over short intervals; `QueryThreadCycleTime` is exact but in cycles. Which one the controller uses is decided with its sampling interval *(pending I-21)* | Microsoft Learn, "GetThreadTimes", "QueryThreadCycleTime" |
+| S-W4 | park on a word *(pending I-04, I-34)* | `WaitOnAddress`, `WakeByAddressSingle`, `WakeByAddressAll` (Windows 8 and later, `Synchronization.lib`) | Microsoft Learn, "WaitOnAddress" |
+| S-W5 | sub-millisecond timer for due jobs *(pending I-33)* | `CreateWaitableTimerExW` with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`, `SetWaitableTimer` (a negative due time is relative, in 100 ns units), `WaitForMultipleObjects` with a wake event for an earlier deadline, `CloseHandle`. The flag exists from Windows 10 1803; if creation fails, a normal waitable timer is used | Microsoft Learn, "CreateWaitableTimerExW" |
+| S-W6 | isolated children die with the parent (no orphans) | `CreateJobObjectW`, `SetInformationJobObject(JobObjectExtendedLimitInformation)` with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, `AssignProcessToJobObject` on the `Child`'s raw handle | Microsoft Learn, "JOBOBJECT_EXTENDED_LIMIT_INFORMATION" |
+
+Write-through (`FILE_FLAG_WRITE_THROUGH`) for the durable log, if I-18 wants it, is `OpenOptionsExt::custom_flags`: safe, no FFI.
+
+### 12.2 Linux (`libc`, which `std` already links)
+
+| Id | Need | Function | Reference |
+|---|---|---|---|
+| S-L1 | topology | `/sys/devices/system/cpu/cpu*/topology/` and `cache/index*/shared_cpu_list`, read with `std::fs` (safe; size-limited reads parsed as untrusted text), restricted to the CPUs `sched_getaffinity(0, len, set)` allows; the set is grown and the call retried on `EINVAL`, for hosts past 1,024 CPUs | `sched_getaffinity(2)`; kernel `Documentation/ABI/stable/sysfs-devices-system-cpu` |
+| S-L2 | pin or place a worker *(pending I-06)* | `sched_setaffinity(0, len, set)` from the worker itself (pid 0 is the calling thread) | `sched_setaffinity(2)` |
+| S-L3 | per-thread CPU time | `pthread_getcpuclockid(pthread_t, &mut clockid)`, then `clock_gettime(clockid, &mut ts)`, with the `pthread_t` from the worker's `JoinHandle`; valid because the pool holds the handle until it joins the thread | `pthread_getcpuclockid(3)`, `clock_gettime(2)` |
+| S-L4 | park on a word *(pending I-04, I-34)* | `syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, null, null, 0)` and `FUTEX_WAKE_PRIVATE`; `SYS_futex` is 202 on x86_64 and 98 on aarch64 and riscv64. `std::thread::park` is already futex-based on Linux, so this is added only for a measured gain | `futex(2)` |
+| S-L5 | isolated children die with the parent | the child calls `prctl(PR_SET_PDEATHSIG, SIGKILL)` at start, then compares `getppid()` with the parent id it was given and exits if they differ (the parent may have died before the call) | `prctl(2)`, `getppid(2)` |
+
+### 12.3 macOS (`libSystem`)
+
+| Id | Need | Function | Reference |
+|---|---|---|---|
+| S-M1 | topology, including performance and efficiency cores | `sysctlbyname` for `hw.physicalcpu`, `hw.logicalcpu`, `hw.nperflevels`, `hw.perflevel{N}.physicalcpu`, `hw.perflevel{N}.l2cachesize`, `hw.cachelinesize` (128 on Apple silicon); every value is read into a buffer of the expected size, and a missing key (older or Intel Macs) is skipped | `sysctl(3)`; Apple, "Determining system capabilities" |
+| S-M2 | placement *(pending I-06)* | macOS has no hard affinity; `pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0)` steers workers to performance cores, `QOS_CLASS_UTILITY` to efficiency cores for low-priority lanes | `pthread/qos.h` |
+| S-M3 | per-thread CPU time | `thread_info(pthread_mach_thread_np(pthread_t), THREAD_BASIC_INFO, &mut info, &mut count)`: user and system time with microsecond resolution; `count` is checked on return | `mach/thread_info.h` |
+| S-M4 | park on a word *(pending I-04, I-34)* | `os_sync_wait_on_address`, `os_sync_wake_by_address_any` (macOS 14.4 and later), looked up with `dlsym(RTLD_DEFAULT, ..)` at start; when missing, `std::thread::park` | `os/os_sync_wait_on_address.h` |
+
+Flushing needs no FFI on any OS (section 8.2).

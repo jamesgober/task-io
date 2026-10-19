@@ -45,6 +45,7 @@ Results are appended to `results/<date>-<host>.md` (committed) and the raw sampl
 | `rusty-pool-elastic` | `rusty_pool` with its documented defaults (max twice the logical CPUs, 60 s keep-alive), core at the worker count; an elastic row in W-12 and W-13 |
 | `executors-ws` | the `executors` crate's `crossbeam_workstealing_pool::small_pool`, the pool its README shows fastest; jobs wrapped in `catch_unwind`. Its `shutdown` drops queued jobs, which W-11 records. Built with `--features ws-no-park` (a separate build), it is named `executors-ws-no-park`: workers never park |
 | `kanal-pool` | crossbeam-pool's design on an unbounded `kanal` channel |
+| `a3s-lane` | `a3s-lane` built with its core queue only, one lane with the worker count as its concurrency on a tokio runtime of that many threads. Its commands are async, so each closure runs in `block_in_place` (run plainly inline, a blocking job stalled its scheduler and W-04 deadlocked; `spawn_blocking` was slower). A sync caller blocks on its async `submit`; the result receiver is dropped (the job still runs) |
 | `tokio-cron` | tokio-cron-scheduler, one `Job::new_async` per schedule (D-02) |
 | `apalis-cron` | one apalis worker per schedule on a `CronScheduler` backend (D-02) |
 | `proto-ring` | **an experiment, not a competitor**: task-io's prototype dispatcher (RESEARCH I-01, I-04, I-05, I-16, I-27, I-36); its rows say "experiment" and never set the bar |
@@ -58,7 +59,7 @@ fang 0.11 can run one job on two workers (it claims with a read and then a separ
 
 `compare/effectum/` does the same for effectum (P-01, P-02, R-01, R-02; it has no idempotency keys, so no K-01), for the same reason: it links SQLite through rusqlite 0.31. effectum opens its database with `PRAGMA journal = wal`, which SQLite ignores (the pragma is `journal_mode`), so it runs in rollback-journal mode with `synchronous = NORMAL` on its writer. The gated P-01 rows measure it that way, as a user gets it, and say so; a second P-01 row enables WAL before effectum opens the file (the mode its code intends) and is a labelled reference, since WAL with `synchronous = NORMAL` can lose commits on power loss. The retry suites read effectum's own `jobs` table to count jobs it failed for good.
 
-Still to add: background-jobs (AGPL-3.0; waiting on PLAN O-9); a3s-lane (memory) from the 2026-10-19 survey; and the contenders that need a local PostgreSQL or Redis: fang on PostgreSQL, graphile-worker, sqlxmq, apalis-postgres, apalis-redis. BENCHMARKS asks for fang's fastest local backend, and until PostgreSQL is measured the SQLite rows are provisional. P-03 has an absolute target only (task-io).
+Still to add: background-jobs (AGPL-3.0; waiting on PLAN O-9); a3s-lane's priority lanes in W-06 (it runs the generic suites now); and the contenders that need a local PostgreSQL or Redis: fang on PostgreSQL, graphile-worker, sqlxmq, apalis-postgres, apalis-redis. BENCHMARKS asks for fang's fastest local backend, and until PostgreSQL is measured the SQLite rows are provisional. P-03 has an absolute target only (task-io).
 
 Building on Windows: the SQLite contenders compile a bundled C library. With no MSVC compiler installed, set `CC=clang-cl` and `AR=llvm-lib` (LLVM), plus `INCLUDE` for the Windows SDK headers.
 
