@@ -113,3 +113,18 @@ jobs:
       - name: Clippy (compare/effectum)
         working-directory: compare/effectum
         run: cargo clippy --release --locked -- -D warnings
+
+  models:
+    name: loom models (compare/models)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compare/models
+      # Every interleaving of the prototype wake protocol, within loom's
+      # preemption bound; the variant without the lost-wakeup fix must fail.
+      - name: Test
+        working-directory: compare/models
+        run: cargo test --release --locked -- --test-threads=1

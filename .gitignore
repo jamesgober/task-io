@@ -10,6 +10,7 @@
 /compare/target/
 /compare/fang/target/
 /compare/effectum/target/
+/compare/models/target/
 /compare/results/raw/
 /compare/results/*-quick.md
 /fuzz/target/
@@ -32,3 +33,4 @@ Cargo.lock
 !/compare/Cargo.lock
 !/compare/fang/Cargo.lock
 !/compare/effectum/Cargo.lock
+!/compare/models/Cargo.lock
