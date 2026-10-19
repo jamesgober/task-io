@@ -16,6 +16,7 @@ mod report;
 mod retries;
 mod stats;
 mod stress;
+mod survey;
 mod sys;
 mod workers;
 
@@ -732,6 +733,12 @@ fn w12(o: &Opts, r: &mut Report) {
                 .collect();
             w12_rows(r, &v, "tokio-blocking-elastic", &res);
         }
+        if o.wants("rusty-pool-elastic") {
+            let res: Vec<_> = (0..runs)
+                .map(|_| stress::w12::<survey::RustyPoolElastic>(0, h, &ph))
+                .collect();
+            w12_rows(r, &v, "rusty-pool-elastic", &res);
+        }
         if o.wants("best-fixed") {
             let (size, first) = stress::w12_best_fixed(h, &ph);
             eprintln!("  best fixed size for {}: {size}", h.label());
@@ -793,6 +800,12 @@ fn w13(o: &Opts, r: &mut Report) {
             .map(|_| stress::w13_hang::<contenders::TokioBlockingElastic>(w))
             .collect();
         rows(r, "tokio-blocking-elastic", &res);
+    }
+    if o.wants("rusty-pool-elastic") {
+        let res: Vec<_> = (0..runs)
+            .map(|_| stress::w13_hang::<survey::RustyPoolElastic>(w))
+            .collect();
+        rows(r, "rusty-pool-elastic", &res);
     }
 }
 

@@ -114,10 +114,10 @@ impl AsyncRunnable for FangJob {
     async fn run(&self, _queue: &dyn AsyncQueueable) -> Result<(), FangError> {
         match self.mode {
             Mode::Effect => {
-                if let Some(f) = EFFECTS.get() {
-                    if let Ok(mut f) = f.lock() {
-                        let _ = f.write_all(&self.i.to_le_bytes());
-                    }
+                if let Some(f) = EFFECTS.get()
+                    && let Ok(mut f) = f.lock()
+                {
+                    let _ = f.write_all(&self.i.to_le_bytes());
                 }
                 Ok(())
             }
@@ -125,7 +125,7 @@ impl AsyncRunnable for FangJob {
                 let mut s = state();
                 let a = s.attempts.entry(self.i).or_insert(0);
                 *a += 1;
-                if self.i % 10 == 0 && *a == 1 {
+                if self.i.is_multiple_of(10) && *a == 1 {
                     return fail("temporary failure (injected)");
                 }
                 *s.runs.entry(self.i).or_insert(0) += 1;

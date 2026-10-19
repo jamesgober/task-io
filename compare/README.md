@@ -40,6 +40,11 @@ Results are appended to `results/<date>-<host>.md` (committed) and the raw sampl
 | `tokio-timer` | one tokio task per delayed job awaiting `sleep_until`, cancelled by `abort` (D-01) |
 
 | `apalis-sqlite` | apalis on SQLite (P-01), measured with `journal_mode = WAL` and `synchronous = FULL` on every connection; its own `setup()` default (`synchronous = OFF`, not power-safe) is a labelled reference row |
+| `affinitypool` | `affinitypool::Threadpool::new(workers)` with its default shards, as its own benchmarks use it. It has no fire-and-forget (dropping a job's future cancels it), so the adapter keeps every handle, boxed, in per-thread shards and drops finished ones as it goes: the cost of fire-and-forget through a generic API |
+| `rusty-pool` | `rusty_pool` as a fixed pool (core = max = workers, threads started up front); jobs wrapped in `catch_unwind`, since a panic costs it a thread restart |
+| `rusty-pool-elastic` | `rusty_pool` with its documented defaults (max twice the logical CPUs, 60 s keep-alive), core at the worker count; an elastic row in W-12 and W-13 |
+| `executors-ws` | the `executors` crate's `crossbeam_workstealing_pool::small_pool`, the pool its README shows fastest; jobs wrapped in `catch_unwind`. Its `shutdown` drops queued jobs, which W-11 records. Built with `--features ws-no-park` (a separate build), it is named `executors-ws-no-park`: workers never park |
+| `kanal-pool` | crossbeam-pool's design on an unbounded `kanal` channel |
 | `tokio-cron` | tokio-cron-scheduler, one `Job::new_async` per schedule (D-02) |
 | `apalis-cron` | one apalis worker per schedule on a `CronScheduler` backend (D-02) |
 | `proto-ring` | **an experiment, not a competitor**: task-io's prototype dispatcher (RESEARCH I-01, I-04, I-05, I-16, I-27, I-36); its rows say "experiment" and never set the bar |
@@ -51,7 +56,7 @@ R-01, R-02, and K-01 also run against `apalis-sqlite` (retry layer with exponent
 
 fang 0.11 can run one job on two workers (it claims with a read and then a separate write), so the fang suites count distinct job ids, never raw completions, and report duplicate runs. They also report how many workers left the pool: a store error after a job (such as losing that race) ends a fang worker, and fang's pool restarts only workers that panicked (RESEARCH I-39, I-40). A run stops waiting after 60 s without progress, since a job fang left `in_progress` is never fetched again.
 
-Still to add: background-jobs (AGPL-3.0; waiting on PLAN O-9), and fang on PostgreSQL. BENCHMARKS asks for fang's fastest local backend, and until PostgreSQL is measured the SQLite rows are provisional. P-03 has an absolute target only (task-io).
+Still to add: background-jobs (AGPL-3.0; waiting on PLAN O-9); effectum (SQLite) and a3s-lane (memory) from the 2026-10-19 survey; and the contenders that need a local PostgreSQL or Redis: fang on PostgreSQL, graphile-worker, sqlxmq, apalis-postgres, apalis-redis. BENCHMARKS asks for fang's fastest local backend, and until PostgreSQL is measured the SQLite rows are provisional. P-03 has an absolute target only (task-io).
 
 Building on Windows: the SQLite contenders compile a bundled C library. With no MSVC compiler installed, set `CC=clang-cl` and `AR=llvm-lib` (LLVM), plus `INCLUDE` for the Windows SDK headers.
 
