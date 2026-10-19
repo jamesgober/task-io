@@ -314,5 +314,11 @@ macro_rules! for_each_contender {
             type $c = $crate::proto::ProtoRing;
             if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
         }
+        {
+            // Experiment (dev/RESEARCH.md I-35, I-03): proto-ring's pool on
+            // per-submitter rings.
+            type $c = $crate::proto::ProtoShards;
+            if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
+        }
     }};
 }

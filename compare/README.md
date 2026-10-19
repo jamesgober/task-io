@@ -43,6 +43,7 @@ Results are appended to `results/<date>-<host>.md` (committed) and the raw sampl
 | `tokio-cron` | tokio-cron-scheduler, one `Job::new_async` per schedule (D-02) |
 | `apalis-cron` | one apalis worker per schedule on a `CronScheduler` backend (D-02) |
 | `proto-ring` | **an experiment, not a competitor**: task-io's prototype dispatcher (RESEARCH I-01, I-04, I-05, I-16, I-27, I-36); its rows say "experiment" and never set the bar |
+| `proto-shards` | **an experiment, not a competitor**: proto-ring's pool on 16 per-submitter rings drained in place by the workers (RESEARCH I-35, I-03) |
 
 R-01, R-02, and K-01 also run against `apalis-sqlite` (retry layer with exponential backoff; idempotency keys), and P-02 kills its worker process half way and restarts it (the harness re-launches itself with `--child`; each worker process gets a unique worker name, since a restarted worker that reuses the dead one's name processes nothing until the old registration expires).
 
