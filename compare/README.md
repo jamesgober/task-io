@@ -61,7 +61,7 @@ fang 0.11 can run one job on two workers (it claims with a read and then a separ
 
 Still to add: background-jobs (AGPL-3.0; waiting on PLAN O-9); a3s-lane's priority lanes in W-06 (it runs the generic suites now); and the contenders that need a local PostgreSQL or Redis: fang on PostgreSQL, graphile-worker, sqlxmq, apalis-postgres, apalis-redis. BENCHMARKS asks for fang's fastest local backend, and until PostgreSQL is measured the SQLite rows are provisional. P-03 has an absolute target only (task-io).
 
-`compare/models/` holds loom models of the prototypes' concurrent protocols (the wake protocol of `proto-ring` and `proto-shards` so far). Run them on Linux with `cargo test --release -- --test-threads=1` (about 3 minutes); on Windows, loom's deadlock report overflowed the stack. The suite includes the protocol without the lost-wakeup fix, and passes only if loom finds that deadlock.
+`compare/models/` holds loom models of the prototypes' concurrent protocols: the wake protocol of `proto-ring` and `proto-shards`, and their ring (Vyukov's protocol, with loom's `UnsafeCell` so every cell access is checked for a race). Run them on Linux with `cargo test --release -- --test-threads=1` (about 3 minutes); on Windows, loom's deadlock report overflowed the stack. Two checks run a broken variant in a child process and pass only if loom finds the failure: the wake protocol without the lost-wakeup fix, and a ring of one cell.
 
 Building on Windows: the SQLite contenders compile a bundled C library. With no MSVC compiler installed, set `CC=clang-cl` and `AR=llvm-lib` (LLVM), plus `INCLUDE` for the Windows SDK headers.
 

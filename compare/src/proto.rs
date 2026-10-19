@@ -120,7 +120,10 @@ unsafe impl Sync for Ring {}
 
 impl Ring {
     fn new(capacity: usize) -> Self {
-        let cap = capacity.next_power_of_two();
+        // At least 2 cells: with 1, a popped cell's sequence equals a
+        // published one's, so a push overwrites an unread job (the loom model
+        // in compare/models/tests/ring.rs finds it).
+        let cap = capacity.max(2).next_power_of_two();
         let cells = (0..cap)
             .map(|i| Cell {
                 seq: AtomicUsize::new(i),
