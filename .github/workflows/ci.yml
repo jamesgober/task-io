@@ -94,10 +94,15 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: compare
+          workspaces: |
+            compare
+            compare/fang
       # The harness is a separate workspace with pinned competitor versions; it
       # is only compiled and linted here, never run (gating runs happen on the
       # reference hosts, dev/BENCHMARKS.md section 2).
       - name: Clippy (compare)
         working-directory: compare
+        run: cargo clippy --release --locked -- -D warnings
+      - name: Clippy (compare/fang)
+        working-directory: compare/fang
         run: cargo clippy --release --locked -- -D warnings

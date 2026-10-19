@@ -47,6 +47,8 @@ Each results file records the exact CPU, OS build, kernel, power plan, disk (for
 - **Allocations per operation:** the counting allocator, measured after a warm-up of 1,000,000 operations.
 - **Reproducible:** `cargo run --release -p compare -- <suite>` reproduces any table. Results are committed as `compare/results/<YYYY-MM-DD>-<host>.md`.
 - **Failing contenders:** if a competitor cannot run a workload (missing feature), the row says so and the remaining competitors set the bar. A workload no competitor supports uses its absolute targets only.
+- **Slow contenders (time box):** a contender too slow to finish a workload's count within its time box (P-01: 120 s per run) is measured on what it completes in that time, and the row states how many operations were measured. The time box never applies to task-io: it always runs the full count.
+- **Equal durability:** a durable contender is measured with its data on stable storage before the acknowledgment, whatever its own default is; its default is also reported, labelled, when it is weaker (for example apalis-sqlite's `setup()` sets `synchronous = OFF`).
 
 **Competitor set** (latest stable at measurement time; extend it in `0.2.0` with any faster job or pool crate found in the survey, never shrink it):
 
@@ -81,7 +83,7 @@ Columns: id, workload (exact), primary metric, statistics gated, competitors.
 |---|---|---|---|---|
 | W-01 | 10,000,000 jobs with an empty handler and an 8-byte payload; 1, 4, 16, 32 workers; submitted from 1 thread and from 32 threads | wall time | median | crossbeam-pool, rayon, tokio-blocking, threadpool, apalis, background-jobs |
 | W-02 | submit-to-start latency, 1,000,000 samples, pool idle and pool 80% busy | latency | p50, p99 | same |
-| W-03 | handlers doing 10 us, 100 us, and 1 ms of busy work | jobs per second as a fraction of the ideal (workers / work time) | median | same |
+| W-03 | handlers doing 10 us, 100 us, and 1 ms of busy work | overhead: 100% minus jobs per second as a share of the ideal (workers / work time); a share near 100% cannot improve 1.20x, its overhead can | median | same |
 | W-04 | 1,000,000 queued jobs with 64-byte payloads | bytes per queued job; heap allocations per submit in steady state | median; **abs: 0 allocations** for payloads up to the inline size | same |
 | W-05 | idle pool for 60 s | wakeups per second; CPU time | **abs: 0 wakeups**; CPU time vs competitors | same |
 | W-06 | 3 lanes with weights 4:2:1, saturated for 30 s | share error per lane; p99 latency of the top lane | **abs: share error at most 2%**; p99 | crossbeam-pool with one channel per lane and a weighted pick |
@@ -141,8 +143,48 @@ The executor suites (task spawn, wake, fork-join, timers for async tasks, channe
 
 ## 5. Results
 
-Filled in by `0.2.0` (competitor baselines, which become the numeric targets) and by every later phase (task-io results). One row per benchmark and host.
+Targets come from the best competitor per gated statistic; task-io's columns are filled by each phase. One row per benchmark, variant, and host.
 
-| Id | Host | Best competitor | Its result | Target (x1.20) | task-io | Factor | Pass |
-|---|---|---|---|---|---|---|---|
-| (none yet) | | | | | | | |
+**Status: provisional.** R1 baselines from the full-protocol run of 2026-10-14 (`compare/results/2026-10-14-R1.md`, 4 h 25 min). That run's host load was not verified (other build processes were later seen on the machine), so every R1 row is re-measured in a verified quiet window before it gates anything. Still to measure: W-04 (re-run with start reservations counted), W-05 context switches (R2), D-01, D-02, K-01, P-01 to P-03, R-01, R-02, and every row on R2. W-07 and S-01/S-02 have absolute targets only; W-06 has only the hand-rolled lane pool, whose 32-worker share error (8.7 points) is far above task-io's absolute 2-point target. W-05: every contender used 0 ms of CPU per second while idle on R1, so the target is the absolute 0.
+
+| Id | Host | Variant | Statistic | Best competitor | Its result | Target (x1.20) | task-io | Factor | Pass |
+|---|---|---|---|---|---|---|---|---|---|
+| W-01 | R1 | 10000000 empty jobs, 1 submitter(s), 1 workers | wall time | crossbeam-bounded | 603 ms | <= 502.5 ms | | | |
+| W-01 | R1 | 10000000 empty jobs, 1 submitter(s), 16 workers | wall time | crossbeam-pool | 1902 ms | <= 1585 ms | | | |
+| W-01 | R1 | 10000000 empty jobs, 1 submitter(s), 32 workers | wall time | tokio-spawn | 2892 ms | <= 2410 ms | | | |
+| W-01 | R1 | 10000000 empty jobs, 1 submitter(s), 4 workers | wall time | crossbeam-pool | 569 ms | <= 474.2 ms | | | |
+| W-01 | R1 | 10000000 empty jobs, 32 submitter(s), 1 workers | wall time | crossbeam-pool | 1046 ms | <= 871.7 ms | | | |
+| W-01 | R1 | 10000000 empty jobs, 32 submitter(s), 16 workers | wall time | crossbeam-pool | 1245 ms | <= 1038 ms | | | |
+| W-01 | R1 | 10000000 empty jobs, 32 submitter(s), 32 workers | wall time | crossbeam-pool | 1222 ms | <= 1018 ms | | | |
+| W-01 | R1 | 10000000 empty jobs, 32 submitter(s), 4 workers | wall time | crossbeam-pool | 1007 ms | <= 839.2 ms | | | |
+| W-02 | R1 | 80% busy, 10 us jobs, 1000000 samples, 32 workers | p50 latency | crossbeam-bounded | 600 ns | <= 500 ns | | | |
+| W-02 | R1 | 80% busy, 10 us jobs, 1000000 samples, 32 workers | p99 latency | tokio-blocking | 98623 ns | <= 82,190 ns | | | |
+| W-02 | R1 | 80% busy, 10 us jobs, 1000000 samples, 4 workers | p50 latency | rayon | 200 ns | <= 166.7 ns | | | |
+| W-02 | R1 | 80% busy, 10 us jobs, 1000000 samples, 4 workers | p99 latency | rayon | 8807 ns | <= 7339 ns | | | |
+| W-02 | R1 | idle pool, 1000000 samples, 32 workers | p50 latency | crossbeam-bounded | 4703 ns | <= 3919 ns | | | |
+| W-02 | R1 | idle pool, 1000000 samples, 32 workers | p99 latency | tokio-blocking | 13607 ns | <= 11,340 ns | | | |
+| W-02 | R1 | idle pool, 1000000 samples, 4 workers | p50 latency | crossbeam-bounded | 4903 ns | <= 4086 ns | | | |
+| W-02 | R1 | idle pool, 1000000 samples, 4 workers | p99 latency | tokio-blocking | 15207 ns | <= 12,670 ns | | | |
+| W-03 | R1 | 10 us busy jobs, 1 workers | overhead (100% - share of ideal) | threadpool | 0.4888 % | <= 0.4073 % | | | |
+| W-03 | R1 | 10 us busy jobs, 16 workers | overhead (100% - share of ideal) | crossbeam-pool | 3.159 % | <= 2.633 % | | | |
+| W-03 | R1 | 10 us busy jobs, 32 workers | overhead (100% - share of ideal) | rayon | 17.94 % | <= 14.95 % | | | |
+| W-03 | R1 | 10 us busy jobs, 4 workers | overhead (100% - share of ideal) | crossbeam-pool | 1.108 % | <= 0.9231 % | | | |
+| W-03 | R1 | 100 us busy jobs, 1 workers | overhead (100% - share of ideal) | threadpool | 0.0755 % | <= 0.0629 % | | | |
+| W-03 | R1 | 100 us busy jobs, 16 workers | overhead (100% - share of ideal) | crossbeam-pool | 0.3798 % | <= 0.3165 % | | | |
+| W-03 | R1 | 100 us busy jobs, 32 workers | overhead (100% - share of ideal) | crossbeam-bounded | 6.199 % | <= 5.166 % | | | |
+| W-03 | R1 | 100 us busy jobs, 4 workers | overhead (100% - share of ideal) | rayon | 0.1863 % | <= 0.1552 % | | | |
+| W-03 | R1 | 1000 us busy jobs, 1 workers | overhead (100% - share of ideal) | crossbeam-pool | 0.0163 % | <= 0.0136 % | | | |
+| W-03 | R1 | 1000 us busy jobs, 16 workers | overhead (100% - share of ideal) | crossbeam-bounded | 0.0848 % | <= 0.0707 % | | | |
+| W-03 | R1 | 1000 us busy jobs, 32 workers | overhead (100% - share of ideal) | threadpool | 4.803 % | <= 4.003 % | | | |
+| W-03 | R1 | 1000 us busy jobs, 4 workers | overhead (100% - share of ideal) | rayon | 0.0323 % | <= 0.0269 % | | | |
+| W-08 | R1 | 2x capacity for 60 s, 100 us jobs, 32 workers | p99 latency | crossbeam-bounded | 328,991,000 ns | <= 274,200,000 ns | | | |
+| W-08 | R1 | 2x capacity for 60 s, 100 us jobs, 4 workers | p99 latency | crossbeam-bounded | 1,776,290,000 ns | <= 1,480,000,000 ns | | | |
+| W-09 | R1 | 1000000 jobs, 10% panic, 32 workers | completed jobs per second | tokio-spawn | 1,989,760 /s | >= 2,388,000 /s | | | |
+| W-09 | R1 | 1000000 jobs, 10% panic, 4 workers | completed jobs per second | crossbeam-bounded | 3,310,400 /s | >= 3,972,000 /s | | | |
+| W-10 | R1 | 500 ms stuck job every second, 85% load, 30 s, 32 workers | p99 latency | tokio-blocking | 4,710,400 ns | <= 3,925,000 ns | | | |
+| W-10 | R1 | 500 ms stuck job every second, 85% load, 30 s, 4 workers | p99 latency | crossbeam-pool | 58,523,600 ns | <= 48,770,000 ns | | | |
+| W-11 | R1 | shutdown with 1000000 queued jobs, 32 workers | time to stop, all jobs run | crossbeam-pool | 172 ms | <= 143.3 ms | | | |
+| W-11 | R1 | shutdown with 1000000 queued jobs, 4 workers | time to stop, all jobs run | tokio-blocking | 259 ms | <= 215.8 ms | | | |
+| W-12 | R1 | load step 10x, 1 ms blocking handlers | p99 latency during the step | tokio-blocking-elastic | 14.21 us | <= 11.84 us | | | |
+| W-12 | R1 | load step 10x, 100 us CPU handlers | p99 latency during the step | best-fixed (crossbeam-pool, 32) | 3.70 us | <= 3.08 us | | | |
+| W-13 | R1 | one handler hangs for 15 s; 85% load of 1 ms jobs, 4 workers | p99 latency of other jobs | tokio-blocking-elastic | 17.31 us | <= 14.43 us | | | |

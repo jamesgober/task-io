@@ -26,6 +26,11 @@ pub trait Contender: Sync + Sized {
         true
     }
     fn shutdown(self);
+    /// Bytes reserved up front per queue slot, for contenders that
+    /// preallocate their queue (so W-04 counts that memory too).
+    fn reserved_bytes_per_slot() -> Option<usize> {
+        None
+    }
 }
 
 type Thunk = Box<dyn FnOnce() + Send + 'static>;
@@ -301,6 +306,12 @@ macro_rules! for_each_contender {
         }
         {
             type $c = $crate::contenders::TokioSpawn;
+            if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
+        }
+        {
+            // Experiment (dev/RESEARCH.md I-01, I-04, I-16, I-27, I-36):
+            // measured alongside the competitors, never counted as one.
+            type $c = $crate::proto::ProtoRing;
             if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
         }
     }};

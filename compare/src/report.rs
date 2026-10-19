@@ -30,6 +30,8 @@ pub struct Row {
     pub unit: &'static str,
     pub value: Value,
     pub raw: Vec<f64>,
+    /// Context, not a gated metric: shown, never ranked.
+    pub info: bool,
 }
 
 impl Row {
@@ -56,6 +58,7 @@ impl Row {
                 higher_is_better,
             },
             raw: samples.to_vec(),
+            info: false,
         }
     }
 
@@ -85,6 +88,7 @@ impl Row {
                 p999: stats::summarize(&c),
             },
             raw: b,
+            info: false,
         }
     }
 
@@ -106,6 +110,7 @@ impl Row {
             unit,
             value: Value::Single(v),
             raw: vec![v],
+            info: false,
         }
     }
 
@@ -125,11 +130,21 @@ impl Row {
             unit: "",
             value: Value::Missing,
             raw: vec![],
+            info: false,
         }
+    }
+
+    /// Marks this row as context (a count or a state), never ranked.
+    pub fn info(mut self) -> Self {
+        self.info = true;
+        self
     }
 
     /// The number used to pick the best contender in a group; lower is better.
     fn rank_key(&self) -> Option<f64> {
+        if self.info {
+            return None;
+        }
         match &self.value {
             Value::Summary {
                 s,
@@ -174,7 +189,12 @@ impl Report {
 
     pub fn finish(self) {
         let date = today();
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("results");
+        // The fang harness (compare/fang) shares this file and sets
+        // COMPARE_RESULTS_DIR so both write to compare/results.
+        let dir = match option_env!("COMPARE_RESULTS_DIR") {
+            Some(d) => PathBuf::from(d),
+            None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("results"),
+        };
         let raw_dir = dir.join("raw");
         let _ = std::fs::create_dir_all(&raw_dir);
         let tag = if self.quick { "-quick" } else { "" };
@@ -221,12 +241,19 @@ impl Report {
                         o.variant == r.variant && o.workers == r.workers && o.metric == r.metric
                     })
                     .collect();
+                // Experiments (task-io prototypes) never set the bar; only
+                // competitors can be Best.
                 let best = group
                     .iter()
+                    .filter(|o| !is_experiment(o.contender))
                     .filter_map(|o| o.rank_key().map(|k| (k, o.contender)))
                     .min_by(|a, b| a.0.total_cmp(&b.0))
                     .map(|(_, c)| c);
-                let mark = if best == Some(r.contender) && group.len() > 1 {
+                let mark = if is_experiment(r.contender) {
+                    "experiment"
+                } else if r.info {
+                    "context"
+                } else if best == Some(r.contender) && group.len() > 1 {
                     "**Best**"
                 } else {
                     ""
@@ -280,13 +307,21 @@ impl Report {
 }
 
 fn fmt_value(r: &Row) -> String {
+    // Four significant digits, so small values (microseconds shown in ms)
+    // keep their precision.
     let n = |x: f64| {
-        if x.abs() >= 100.0 {
+        let a = x.abs();
+        if a >= 1000.0 || a == 0.0 {
             format!("{x:.0}")
-        } else if x.abs() >= 10.0 {
+        } else if a >= 100.0 {
             format!("{x:.1}")
-        } else {
+        } else if a >= 10.0 {
             format!("{x:.2}")
+        } else if a >= 1.0 {
+            format!("{x:.3}")
+        } else {
+            let digits = (3.0 - a.log10().floor()) as usize;
+            format!("{x:.digits$}")
         }
     };
     match &r.value {
@@ -331,4 +366,9 @@ fn today() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// task-io prototypes and builds are measured but never set the bar.
+pub fn is_experiment(contender: &str) -> bool {
+    contender.starts_with("proto-") || contender.starts_with("task-io")
 }

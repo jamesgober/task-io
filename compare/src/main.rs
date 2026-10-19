@@ -6,9 +6,14 @@
 
 mod alloc;
 mod contenders;
+mod crash;
+mod cronjobs;
 mod delayed;
+mod durable;
 mod jobs;
+mod proto;
 mod report;
+mod retries;
 mod stats;
 mod stress;
 mod sys;
@@ -69,7 +74,7 @@ fn parse() -> (Vec<String>, Opts) {
     if suites.is_empty() || suites.iter().any(|s| s == "all") {
         suites = [
             "W-01", "W-02", "W-03", "W-04", "W-05", "W-06", "W-08", "W-09", "W-10", "W-11", "W-12",
-            "W-13",
+            "W-13", "D-01", "D-02", "P-01", "P-02", "R-01", "R-02", "K-01",
         ]
         .map(String::from)
         .to_vec();
@@ -78,6 +83,12 @@ fn parse() -> (Vec<String>, Opts) {
 }
 
 fn main() {
+    // Child processes for the crash suite (P-02).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--child") {
+        crash::child(&args[1..]);
+        return;
+    }
     let (suites, o) = parse();
     let mut report = Report::new(&o.host, o.quick);
     for s in &suites {
@@ -96,6 +107,12 @@ fn main() {
             "W-12" => w12(&o, &mut report),
             "W-13" => w13(&o, &mut report),
             "D-01" => d01(&o, &mut report),
+            "D-02" => d02(&o, &mut report),
+            "P-01" => p01(&o, &mut report),
+            "P-02" => p02(&o, &mut report),
+            "R-01" => r01(&o, &mut report),
+            "R-02" => r02(&o, &mut report),
+            "K-01" => k01(&o, &mut report),
             other => eprintln!("unknown suite {other}"),
         }
     }
@@ -116,8 +133,8 @@ fn apalis_smoke(o: &Opts, r: &mut Report) {
     std::panic::set_hook(hook);
     let v = "200000 empty jobs, 1 submitter (smoke check)".to_string();
     match res {
-        Ok(secs) => r.push(Row::single("W-01", v, "apalis", 4, "wall time (in-memory backend ran; add it to the suites)", "ms", secs * 1000.0)),
-        Err(_) => r.push(Row::missing("W-01", v, "apalis", 4, "panicked in apalis-core 1.0.0 memory.rs:246 (push races the worker's poll_ready); cannot be measured")),
+        Ok(secs) => r.push(Row::single("W-01", v, "apalis", 4, "wall time (in-memory backend ran; add it to the suites)", "ms", secs * 1000.0).info()),
+        Err(_) => r.push(Row::missing("W-01", v, "apalis", 4, "panicked in apalis-core 1.0.0 memory.rs:246 (push races the worker's poll_ready); cannot be measured").info()),
     }
 }
 
@@ -227,10 +244,34 @@ fn w04(o: &Opts, r: &mut Report) {
                 format!("{jobs} queued jobs, 64-byte payload"),
                 C::NAME,
                 w,
-                "heap bytes per queued job",
+                "effective bytes per queued job (growth + start reservation / queued)",
                 "B",
-                m.heap_bytes_per_job,
+                m.effective_bytes_per_job,
             ));
+            r.push(
+                Row::single(
+                    "W-04",
+                    format!("{jobs} queued jobs, 64-byte payload"),
+                    C::NAME,
+                    w,
+                    "heap reserved at start",
+                    "B",
+                    m.reserved_at_start,
+                )
+                .info(),
+            );
+            r.push(
+                Row::single(
+                    "W-04",
+                    format!("{jobs} queued jobs, 64-byte payload"),
+                    C::NAME,
+                    w,
+                    "heap growth per queued job",
+                    "B",
+                    m.heap_bytes_per_job,
+                )
+                .info(),
+            );
             r.push(Row::single(
                 "W-04",
                 format!("{jobs} queued jobs, 64-byte payload"),
@@ -240,27 +281,47 @@ fn w04(o: &Opts, r: &mut Report) {
                 "",
                 m.allocs_per_submit,
             ));
+            if let Some(b) = C::reserved_bytes_per_slot() {
+                r.push(
+                    Row::single(
+                        "W-04",
+                        format!("{jobs} queued jobs, 64-byte payload"),
+                        C::NAME,
+                        w,
+                        "preallocated bytes per queue slot (count with heap bytes)",
+                        "B",
+                        b as f64,
+                    )
+                    .info(),
+                );
+            }
             if m.queued < jobs {
-                r.push(Row::single(
-                    "W-04",
-                    format!("{jobs} queued jobs, 64-byte payload"),
-                    C::NAME,
-                    w,
-                    "jobs it accepted (bounded queue)",
-                    "",
-                    m.queued as f64,
-                ));
+                r.push(
+                    Row::single(
+                        "W-04",
+                        format!("{jobs} queued jobs, 64-byte payload"),
+                        C::NAME,
+                        w,
+                        "jobs it accepted (bounded queue)",
+                        "",
+                        m.queued as f64,
+                    )
+                    .info(),
+                );
             }
             if let Some(rss) = m.rss_bytes_per_job {
-                r.push(Row::single(
-                    "W-04",
-                    format!("{jobs} queued jobs, 64-byte payload"),
-                    C::NAME,
-                    w,
-                    "RSS bytes per queued job",
-                    "B",
-                    rss,
-                ));
+                r.push(
+                    Row::single(
+                        "W-04",
+                        format!("{jobs} queued jobs, 64-byte payload"),
+                        C::NAME,
+                        w,
+                        "RSS bytes per queued job",
+                        "B",
+                        rss,
+                    )
+                    .info(),
+                );
             }
         });
     }
@@ -310,13 +371,16 @@ fn w05(o: &Opts, r: &mut Report) {
                     "",
                     x,
                 )),
-                None => r.push(Row::missing(
-                    "W-05",
-                    v,
-                    C::NAME,
-                    w,
-                    "context switches per second (not exposed on this OS)",
-                )),
+                None => r.push(
+                    Row::missing(
+                        "W-05",
+                        v,
+                        C::NAME,
+                        w,
+                        "context switches per second (not exposed on this OS)",
+                    )
+                    .info(),
+                ),
             }
         });
     }
@@ -420,16 +484,19 @@ fn w08(o: &Opts, r: &mut Report) {
                 &rss,
             ));
             let refused: Vec<f64> = res.iter().map(|x| x.refused_pct).collect();
-            r.push(Row::summary(
-                "W-08",
-                v.clone(),
-                C::NAME,
-                w,
-                "refused",
-                "%",
-                false,
-                &refused,
-            ));
+            r.push(
+                Row::summary(
+                    "W-08",
+                    v.clone(),
+                    C::NAME,
+                    w,
+                    "refused",
+                    "%",
+                    false,
+                    &refused,
+                )
+                .info(),
+            );
             let hs: Vec<_> = res.into_iter().map(|x| x.admitted).collect();
             r.push(Row::latency("W-08", v, C::NAME, w, &hs));
         });
@@ -461,15 +528,7 @@ fn w09(o: &Opts, r: &mut Report) {
                 &rate,
             ));
             let lost = res.iter().map(|x| x.workers_lost).max().unwrap_or(0) as f64;
-            r.push(Row::single(
-                "W-09",
-                v,
-                C::NAME,
-                w,
-                "workers lost (worst run)",
-                "",
-                lost,
-            ));
+            r.push(Row::single("W-09", v, C::NAME, w, "workers lost (worst run)", "", lost).info());
         });
     }
     std::panic::set_hook(hook);
@@ -506,11 +565,14 @@ fn w11(o: &Opts, r: &mut Report) {
             let stop: Vec<f64> = res.iter().map(|x| x.stop_ms).collect();
             // Only a contender that ran every accepted job before stop returned
             // can set the bar; one that drops work is listed apart.
-            let kept_all = res.iter().all(|x| x.completed == x.queued);
+            // Comparable only if it held the whole queue and ran all of it.
+            let kept_all = res
+                .iter()
+                .all(|x| x.queued == queued as u64 && x.completed == x.queued);
             let metric = if kept_all {
                 "time to stop, every accepted job run"
             } else {
-                "time to stop, dropped queued jobs (not eligible)"
+                "time to stop, not eligible (dropped jobs or could not hold the queue)"
             };
             r.push(Row::summary(
                 "W-11",
@@ -524,35 +586,44 @@ fn w11(o: &Opts, r: &mut Report) {
             ));
             let ran = res.iter().map(|x| x.completed).min().unwrap_or(0) as f64;
             let q = res.iter().map(|x| x.queued).min().unwrap_or(0) as f64;
-            r.push(Row::single(
-                "W-11",
-                v.clone(),
-                C::NAME,
-                w,
-                "jobs it accepted into the queue",
-                "",
-                q,
-            ));
-            r.push(Row::single(
-                "W-11",
-                v.clone(),
-                C::NAME,
-                w,
-                "jobs run before stop returned (worst run)",
-                "",
-                ran,
-            ));
-            match res.iter().filter_map(|x| x.threads_left).max() {
-                Some(t) => r.push(Row::single(
+            r.push(
+                Row::single(
                     "W-11",
-                    v,
+                    v.clone(),
                     C::NAME,
                     w,
-                    "threads left 200 ms after stop (worst run)",
+                    "jobs it accepted into the queue",
                     "",
-                    t as f64,
-                )),
-                None => r.push(Row::missing("W-11", v, C::NAME, w, "threads left")),
+                    q,
+                )
+                .info(),
+            );
+            r.push(
+                Row::single(
+                    "W-11",
+                    v.clone(),
+                    C::NAME,
+                    w,
+                    "jobs run before stop returned (worst run)",
+                    "",
+                    ran,
+                )
+                .info(),
+            );
+            match res.iter().filter_map(|x| x.threads_left).max() {
+                Some(t) => r.push(
+                    Row::single(
+                        "W-11",
+                        v,
+                        C::NAME,
+                        w,
+                        "threads left 200 ms after stop (worst run)",
+                        "",
+                        t as f64,
+                    )
+                    .info(),
+                ),
+                None => r.push(Row::missing("W-11", v, C::NAME, w, "threads left").info()),
             }
         });
     }
@@ -583,46 +654,58 @@ fn w12_rows(r: &mut Report, v: &str, name: &'static str, res: &[stress::StepResu
     ));
     let retire: Vec<f64> = res.iter().filter_map(|x| x.retire_s).collect();
     if retire.is_empty() {
-        r.push(Row::missing(
-            "W-12",
-            v.to_string(),
-            name,
-            0,
-            "time to retire extra threads",
-        ));
+        r.push(
+            Row::missing(
+                "W-12",
+                v.to_string(),
+                name,
+                0,
+                "time to retire extra threads",
+            )
+            .info(),
+        );
     } else {
-        r.push(Row::summary(
-            "W-12",
-            v.to_string(),
-            name,
-            0,
-            "time to retire extra threads",
-            "s",
-            false,
-            &retire,
-        ));
+        r.push(
+            Row::summary(
+                "W-12",
+                v.to_string(),
+                name,
+                0,
+                "time to retire extra threads",
+                "s",
+                false,
+                &retire,
+            )
+            .info(),
+        );
     }
     if let Some(rev) = res.iter().filter_map(|x| x.reversals).max() {
-        r.push(Row::single(
-            "W-12",
-            v.to_string(),
-            name,
-            0,
-            "thread-count reversals (worst run)",
-            "",
-            rev as f64,
-        ));
+        r.push(
+            Row::single(
+                "W-12",
+                v.to_string(),
+                name,
+                0,
+                "thread-count reversals (worst run)",
+                "",
+                rev as f64,
+            )
+            .info(),
+        );
     }
     if let Some(p) = res.iter().filter_map(|x| x.peak_threads).max() {
-        r.push(Row::single(
-            "W-12",
-            v.to_string(),
-            name,
-            0,
-            "peak threads (worst run)",
-            "",
-            p as f64,
-        ));
+        r.push(
+            Row::single(
+                "W-12",
+                v.to_string(),
+                name,
+                0,
+                "peak threads (worst run)",
+                "",
+                p as f64,
+            )
+            .info(),
+        );
     }
 }
 
@@ -657,15 +740,18 @@ fn w12(o: &Opts, r: &mut Report) {
                 res.push(stress::w12::<contenders::CrossbeamPool>(size, h, &ph));
             }
             w12_rows(r, &v, "best-fixed (crossbeam-pool)", &res);
-            r.push(Row::single(
-                "W-12",
-                v.clone(),
-                "best-fixed (crossbeam-pool)",
-                0,
-                "best fixed size found",
-                "workers",
-                size as f64,
-            ));
+            r.push(
+                Row::single(
+                    "W-12",
+                    v.clone(),
+                    "best-fixed (crossbeam-pool)",
+                    0,
+                    "best fixed size found",
+                    "workers",
+                    size as f64,
+                )
+                .info(),
+            );
         }
     }
 }
@@ -745,25 +831,31 @@ fn d01(o: &Opts, r: &mut Report) {
             &can,
         ));
         let early = res.iter().map(|x| x.early).max().unwrap_or(0) as f64;
-        r.push(Row::single(
-            "D-01",
-            v.clone(),
-            name,
-            w,
-            "jobs that ran early (worst run)",
-            "",
-            early,
-        ));
+        r.push(
+            Row::single(
+                "D-01",
+                v.clone(),
+                name,
+                w,
+                "jobs that ran early (worst run)",
+                "",
+                early,
+            )
+            .info(),
+        );
         let late_cancel = res.iter().map(|x| x.fired_cancelled).max().unwrap_or(0) as f64;
-        r.push(Row::single(
-            "D-01",
-            v.clone(),
-            name,
-            w,
-            "jobs that ran after their cancel (worst run)",
-            "",
-            late_cancel,
-        ));
+        r.push(
+            Row::single(
+                "D-01",
+                v.clone(),
+                name,
+                w,
+                "jobs that ran after their cancel (worst run)",
+                "",
+                late_cancel,
+            )
+            .info(),
+        );
         let hs: Vec<_> = res.into_iter().map(|x| x.lateness).collect();
         let mut row = Row::latency("D-01", v.clone(), name, w, &hs);
         row.metric = "firing lateness".into();
@@ -778,5 +870,373 @@ fn d01(o: &Opts, r: &mut Report) {
             .map(|_| delayed::d01_tokio(w, n, window))
             .collect();
         rows(r, "tokio-timer", res);
+    }
+}
+
+fn p01(o: &Opts, r: &mut Report) {
+    let (target, time_box, runs) = if o.quick {
+        (5_000u64, Duration::from_secs(10), 1)
+    } else {
+        (1_000_000u64, Duration::from_secs(120), 3)
+    };
+    let dir = std::env::temp_dir().join("task-io-compare-p01");
+    let _ = std::fs::create_dir_all(&dir);
+    if !o.wants("apalis-sqlite") {
+        return;
+    }
+    for subs in [1usize, 32] {
+        for (sync, name) in [
+            (durable::Sync::Full, "apalis-sqlite"),
+            (
+                durable::Sync::ApalisDefault,
+                "apalis-sqlite (default, synchronous=OFF: not power-safe)",
+            ),
+        ] {
+            let res: Vec<_> = (0..runs)
+                .map(|_| durable::p01_apalis(&dir, sync, subs, target, time_box))
+                .collect();
+            let n = res.iter().map(|x| x.submits).min().unwrap_or(0);
+            let v = format!(
+                "durable submits, 64-byte payload, {subs} submitter(s), up to {target} or {} s (measured {n})",
+                time_box.as_secs()
+            );
+            let rate: Vec<f64> = res.iter().map(|x| x.per_second).collect();
+            r.push(Row::summary(
+                "P-01",
+                v.clone(),
+                name,
+                subs,
+                "submits per second",
+                "/s",
+                true,
+                &rate,
+            ));
+            let hs: Vec<_> = res.into_iter().map(|x| x.latency).collect();
+            let mut row = Row::latency("P-01", v, name, subs, &hs);
+            row.metric = "submit-to-durable latency".into();
+            r.push(row);
+        }
+    }
+}
+
+fn d02(o: &Opts, r: &mut Report) {
+    // Full protocol: 10,000 schedules firing every minute for 10 minutes.
+    // Quick: 1,000 every second for 10 seconds.
+    let (n, period, run_for, label) = if o.quick {
+        (
+            1_000,
+            cronjobs::Period::Second,
+            Duration::from_secs(10),
+            "every second for 10 s",
+        )
+    } else {
+        (
+            10_000,
+            cronjobs::Period::Minute,
+            Duration::from_secs(600),
+            "every minute for 10 min",
+        )
+    };
+    let v = format!("{n} cron schedules, {label}");
+    let rows = |r: &mut Report, name: &'static str, res: cronjobs::CronResult| {
+        r.push(
+            Row::single(
+                "D-02",
+                v.clone(),
+                name,
+                0,
+                &format!("ticks fired (expected {})", res.expected),
+                "",
+                res.fired as f64,
+            )
+            .info(),
+        );
+        match res.cpu_ms {
+            Some(c) => r.push(Row::single(
+                "D-02",
+                v.clone(),
+                name,
+                0,
+                "CPU time over the run",
+                "ms",
+                c,
+            )),
+            None => r.push(Row::missing(
+                "D-02",
+                v.clone(),
+                name,
+                0,
+                "CPU time over the run",
+            )),
+        }
+        let mut row = Row::latency("D-02", v.clone(), name, 0, &[res.lateness]);
+        row.metric = "firing lateness".into();
+        r.push(row);
+    };
+    if o.wants("tokio-cron") {
+        rows(r, "tokio-cron", cronjobs::d02_tokio(n, period, run_for));
+    }
+    if o.wants("apalis-cron") {
+        rows(r, "apalis-cron", cronjobs::d02_apalis(n, period, run_for));
+    }
+}
+
+fn rk_dir() -> std::path::PathBuf {
+    let d = std::env::temp_dir().join("task-io-compare-rk");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+fn r01(o: &Opts, r: &mut Report) {
+    if !o.wants("apalis-sqlite") {
+        return;
+    }
+    let (n, time_box, runs) = if o.quick {
+        (2_000u64, Duration::from_secs(20), 1)
+    } else {
+        (100_000u64, Duration::from_secs(120), 3)
+    };
+    let res: Vec<_> = (0..runs)
+        .map(|_| retries::r01_apalis(&rk_dir(), n, time_box))
+        .collect();
+    let jobs = res.iter().map(|x| x.jobs).min().unwrap_or(0);
+    let v = format!("10% fail once, backoff 10 ms to 1 s, {jobs} jobs (time-boxed submit)");
+    if res.iter().all(|x| x.finished) {
+        let rate: Vec<f64> = res.iter().map(|x| x.jobs_per_s).collect();
+        r.push(Row::summary(
+            "R-01",
+            v,
+            "apalis-sqlite",
+            32,
+            "completed jobs per second",
+            "/s",
+            true,
+            &rate,
+        ));
+    } else {
+        r.push(
+            Row::missing(
+                "R-01",
+                v,
+                "apalis-sqlite",
+                32,
+                "did not finish within 10 minutes",
+            )
+            .info(),
+        );
+    }
+}
+
+fn r02(o: &Opts, r: &mut Report) {
+    if !o.wants("apalis-sqlite") {
+        return;
+    }
+    let (n, outage, time_box, runs) = if o.quick {
+        (1_000u64, Duration::from_secs(3), Duration::from_secs(20), 1)
+    } else {
+        (
+            20_000u64,
+            Duration::from_secs(10),
+            Duration::from_secs(120),
+            3,
+        )
+    };
+    let res: Vec<_> = (0..runs)
+        .map(|_| retries::r02_apalis(&rk_dir(), n, outage, time_box))
+        .collect();
+    let jobs = res.iter().map(|x| x.jobs).min().unwrap_or(0);
+    let v = format!(
+        "downstream down {} s, {jobs} jobs, 10 attempts, backoff 100 ms to 2 s",
+        outage.as_secs()
+    );
+    let waste: Vec<f64> = res
+        .iter()
+        .map(|x| x.attempts_during_outage as f64)
+        .collect();
+    r.push(Row::summary(
+        "R-02",
+        v.clone(),
+        "apalis-sqlite",
+        32,
+        "attempts made during the outage",
+        "",
+        false,
+        &waste,
+    ));
+    let drains: Vec<f64> = res.iter().filter_map(|x| x.drain_s).collect();
+    if drains.len() == res.len() {
+        r.push(Row::summary(
+            "R-02",
+            v.clone(),
+            "apalis-sqlite",
+            32,
+            "time to drain after recovery",
+            "s",
+            false,
+            &drains,
+        ));
+    } else {
+        r.push(
+            Row::missing(
+                "R-02",
+                v.clone(),
+                "apalis-sqlite",
+                32,
+                "did not drain within 10 minutes",
+            )
+            .info(),
+        );
+    }
+    let unaccounted = res
+        .iter()
+        .map(|x| x.jobs.saturating_sub(x.completed + x.dead))
+        .max()
+        .unwrap_or(0) as f64;
+    r.push(
+        Row::single(
+            "R-02",
+            v,
+            "apalis-sqlite",
+            32,
+            "jobs neither completed nor recorded as failed (worst run)",
+            "",
+            unaccounted,
+        )
+        .info(),
+    );
+}
+
+fn k01(o: &Opts, r: &mut Report) {
+    if !o.wants("apalis-sqlite") {
+        return;
+    }
+    let (n, time_box, runs) = if o.quick {
+        (2_000u64, Duration::from_secs(20), 1)
+    } else {
+        (10_000_000u64, Duration::from_secs(120), 3)
+    };
+    let res: Vec<_> = (0..runs)
+        .map(|_| retries::k01_apalis(&rk_dir(), 32, n, time_box))
+        .collect();
+    let subs = res.iter().map(|x| x.submits).min().unwrap_or(0);
+    let v = format!("32 submitters, half the keys repeated, {subs} submits (time-boxed)");
+    let keyed: Vec<f64> = res.iter().map(|x| x.ns_per_submit_keyed).collect();
+    r.push(Row::summary(
+        "K-01",
+        v.clone(),
+        "apalis-sqlite",
+        32,
+        "time per keyed submit",
+        "ns",
+        false,
+        &keyed,
+    ));
+    let plain: Vec<f64> = res.iter().map(|x| x.ns_per_submit_plain).collect();
+    r.push(
+        Row::summary(
+            "K-01",
+            v.clone(),
+            "apalis-sqlite",
+            32,
+            "time per plain submit (1 submitter, reference)",
+            "ns",
+            false,
+            &plain,
+        )
+        .info(),
+    );
+    let dups = res.iter().map(|x| x.duplicate_runs).max().unwrap_or(0) as f64;
+    r.push(
+        Row::single(
+            "K-01",
+            v,
+            "apalis-sqlite",
+            32,
+            "duplicate runs (worst run)",
+            "",
+            dups,
+        )
+        .info(),
+    );
+}
+
+fn p02(o: &Opts, r: &mut Report) {
+    if !o.wants("apalis-sqlite") {
+        return;
+    }
+    // BENCHMARKS asks for 1,000,000 pending jobs; apalis on SQLite runs a few
+    // hundred durable jobs a second, so its runs use fewer (the time-box rule)
+    // and the row says how many.
+    let (n, limit, runs) = if o.quick {
+        (2_000u64, Duration::from_secs(120), 1)
+    } else {
+        (50_000u64, Duration::from_secs(900), 3)
+    };
+    let dir = std::env::temp_dir().join("task-io-compare-p02");
+    let res: Vec<_> = (0..runs)
+        .map(|_| crash::p02_apalis(&dir, n, limit))
+        .collect();
+    let v = format!("kill -9 at half way, restart, {n} pending jobs");
+    let resumes: Vec<f64> = res.iter().filter_map(|x| x.resume_s).collect();
+    if resumes.len() == res.len() {
+        r.push(Row::summary(
+            "P-02",
+            v.clone(),
+            "apalis-sqlite",
+            32,
+            "time to resume after restart",
+            "s",
+            false,
+            &resumes,
+        ));
+    } else {
+        r.push(
+            Row::missing(
+                "P-02",
+                v.clone(),
+                "apalis-sqlite",
+                32,
+                "did not resume within the limit",
+            )
+            .info(),
+        );
+    }
+    let lost = res.iter().map(|x| x.lost).max().unwrap_or(0) as f64;
+    r.push(
+        Row::single(
+            "P-02",
+            v.clone(),
+            "apalis-sqlite",
+            32,
+            "lost jobs (worst run)",
+            "",
+            lost,
+        )
+        .info(),
+    );
+    let dups = res.iter().map(|x| x.duplicates).max().unwrap_or(0) as f64;
+    r.push(
+        Row::single(
+            "P-02",
+            v.clone(),
+            "apalis-sqlite",
+            32,
+            "duplicate effects (worst run)",
+            "",
+            dups,
+        )
+        .info(),
+    );
+    if !res.iter().all(|x| x.finished) {
+        r.push(
+            Row::missing(
+                "P-02",
+                v,
+                "apalis-sqlite",
+                32,
+                "not every job completed within the limit",
+            )
+            .info(),
+        );
     }
 }

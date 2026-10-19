@@ -275,6 +275,11 @@ pub fn open(gate: &Gate) {
 
 pub struct MemResult {
     pub queued: usize,
+    /// Heap reserved by `start`, in bytes.
+    pub reserved_at_start: f64,
+    /// Heap growth per queued job plus the start reservation spread over the
+    /// queued jobs: the W-04 primary metric.
+    pub effective_bytes_per_job: f64,
     pub heap_bytes_per_job: f64,
     pub allocs_per_submit: f64,
     pub rss_bytes_per_job: Option<f64>,
@@ -282,7 +287,15 @@ pub struct MemResult {
 
 /// Memory held per queued job with a 64-byte payload, after a warm-up batch.
 pub fn w04<C: Contender>(workers: usize, jobs: usize) -> MemResult {
+    // Heap the contender reserves when it starts (a preallocated queue, for
+    // example): counted in the effective bytes per queued job, so a design
+    // that reserves memory up front is not shown as free.
+    crate::alloc::start();
+    let r0 = crate::alloc::snapshot();
     let pool = C::start(workers);
+    let r1 = crate::alloc::snapshot();
+    crate::alloc::stop();
+    let reserved = (r1.live_bytes - r0.live_bytes).max(0) as f64;
     // Workers are held at a gate, so a bounded contender fills up; submit
     // without waiting and count only what it accepted.
     let submit_batch = |pool: &C| {
@@ -320,9 +333,12 @@ pub fn w04<C: Contender>(workers: usize, jobs: usize) -> MemResult {
     latch.wait();
     pool.shutdown();
     let n = accepted.max(1) as f64;
+    let growth = (a1.live_bytes - a0.live_bytes) as f64 / n;
     MemResult {
         queued: accepted,
-        heap_bytes_per_job: (a1.live_bytes - a0.live_bytes) as f64 / n,
+        reserved_at_start: reserved,
+        effective_bytes_per_job: growth + reserved / n,
+        heap_bytes_per_job: growth,
         allocs_per_submit: (a1.allocs - a0.allocs) as f64 / n,
         rss_bytes_per_job: match (rss0, rss1) {
             (Some(a), Some(b)) => Some((b as f64 - a as f64) / n),
