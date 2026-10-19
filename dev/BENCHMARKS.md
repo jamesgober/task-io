@@ -72,7 +72,7 @@ Each results file records the exact CPU, OS build, kernel, power plan, disk (for
 | rusty-pool | `rusty_pool` as a fixed pool, and as an elastic pool (core at the worker count, larger max, idle retirement) for W-12 and W-13; added by the 2026-10-19 survey |
 | executors-ws | the `executors` crate's `crossbeam_workstealing_pool`, with and without its `ws-no-park` feature; added by the 2026-10-19 survey (it publishes throughput above threadpool). Finding (2026-10-19): its `shutdown` drops queued jobs (W-11: 200,000 accepted, 0 run), so it cannot set the W-11 bar |
 | kanal-pool | crossbeam-pool's design on a `kanal` channel, so the hand-rolled baseline is the fastest one available; added by the 2026-10-19 survey |
-| effectum | `effectum` on SQLite at the same durability (durable rows); added by the 2026-10-19 survey |
+| effectum | `effectum` on SQLite (durable rows), as shipped: rollback-journal mode with `synchronous = NORMAL`, because its `PRAGMA journal = wal` is not a SQLite pragma and is ignored; added by the 2026-10-19 survey. Finding (2026-10-19): its retry step updates every job's try count and history, not only the retried job's, so jobs are failed for good after one failure (RESEARCH section 6, I-41) |
 | a3s-lane | `a3s-lane` with its memory backend (lanes, retries, dead letters, dedupe: the closest feature match); added by the 2026-10-19 survey |
 | graphile-worker, sqlxmq, apalis-postgres | PostgreSQL job queues, and apalis-redis on Redis, run locally at the same durability (durable rows); added by the 2026-10-19 survey. They need a local PostgreSQL and Redis, which are not installed on R1 yet |
 
