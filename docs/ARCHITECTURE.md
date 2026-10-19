@@ -132,6 +132,12 @@ Every transition of a job is one call; each returns only after the transition is
 | `expire(id, token)` | lease expired: back to pending (controller repair) |
 | `recover()` | after a restart: every non-terminal job, leased ones returned to pending |
 
+Every implementation, task-io's own and every adapter's, must also hold to these, and the contract tests check each one *(I-39, I-40)*:
+
+- **A transition is one conditional step.** `lease` moves a job from pending to leased only if it is still pending, in the same operation that reads it, so two concurrent `lease` calls never return the same job. `complete`, `retry`, `dead_letter`, and `expire` apply only if the token is current.
+- **A keyed `put` is one step.** The duplicate check and the insert happen together; there is no window between a lookup and an insert in which a second `put` with the same key gets in.
+- **A stale token is an outcome, not an error.** A transition refused because the lease moved returns a typed `Stale` result. A worker records it as an event and moves on. No store result, error or otherwise, ends a worker; a worker that ends outside shutdown is dead to the controller and is replaced.
+
 ### 8.2 The durable log format *(pending I-11, I-18)*
 
 - A directory of segment files, `00000001.log`, `00000002.log`, ..., each up to 64 MiB.
