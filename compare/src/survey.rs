@@ -234,6 +234,78 @@ impl Contender for ExecutorsWs {
 }
 
 // ---------------------------------------------------------------------------
+// a3s-lane: one lane with `workers` concurrency, built with its core queue
+// only. Its commands are async, so a closure (which may block) runs inside
+// `block_in_place`, which hands the worker's other tasks (a3s-lane's scheduler
+// among them) to another thread first. Run plainly inline, a blocked job
+// stalls the scheduler with it (W-04 deadlocked that way); `block_in_place`
+// was faster than `spawn_blocking` (W-01 at 4 workers, 1 submitter: 6.1 s
+// against 17.4 s, quick runs). `Command` takes `&self`, so the
+// closure sits in a `Mutex<Option<_>>` and runs once; the result receiver is
+// dropped (the job still runs). Submitting is async, so a sync caller blocks
+// on it.
+// ---------------------------------------------------------------------------
+
+struct LaneJob<F>(Mutex<Option<F>>);
+
+#[async_trait::async_trait]
+impl<F: FnOnce() + Send + 'static> a3s_lane::Command for LaneJob<F> {
+    async fn execute(&self) -> a3s_lane::Result<serde_json::Value> {
+        let f = self.0.lock().ok().and_then(|mut g| g.take());
+        if let Some(f) = f {
+            tokio::task::block_in_place(move || {
+                let _ = catch_unwind(AssertUnwindSafe(f));
+            });
+        }
+        Ok(serde_json::Value::Null)
+    }
+
+    fn command_type(&self) -> &str {
+        "bench"
+    }
+}
+
+pub struct A3sLane {
+    rt: tokio::runtime::Runtime,
+    manager: a3s_lane::QueueManager,
+}
+
+impl Contender for A3sLane {
+    const NAME: &'static str = "a3s-lane";
+
+    fn start(workers: usize) -> Self {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers.max(1))
+            .max_blocking_threads(workers.max(1))
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let manager = rt.block_on(async {
+            let m = a3s_lane::QueueManagerBuilder::new(a3s_lane::EventEmitter::new(100))
+                .with_lane("work", a3s_lane::LaneConfig::new(workers, workers), 0)
+                .build()
+                .await
+                .expect("a3s-lane manager");
+            m.start().await.expect("a3s-lane start");
+            m
+        });
+        Self { rt, manager }
+    }
+
+    fn spawn<F: FnOnce() + Send + 'static>(&self, f: F) {
+        let job = Box::new(LaneJob(Mutex::new(Some(f))));
+        let _ = self.rt.block_on(self.manager.submit("work", job));
+    }
+
+    fn shutdown(self) {
+        self.rt.block_on(async {
+            self.manager.shutdown().await;
+            let _ = self.manager.drain(Duration::from_secs(10)).await;
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
 // kanal-pool: crossbeam-pool's design (std threads looping on `recv`) on an
 // unbounded kanal channel. Dropping the last sender lets the workers drain
 // the queue and stop; `close()` would discard queued jobs, so it is not used.
