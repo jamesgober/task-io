@@ -214,25 +214,29 @@ pub struct Health {
 }
 
 pub trait EventSink: Send + Sync + 'static {
-    fn event(&self, e: &Event);
+    fn event(&self, e: &Event<'_>);
 }
 
+// Fields borrow from the pool, so an event costs no allocation; a sink that
+// keeps one copies what it needs.
 #[non_exhaustive]
-pub enum Event {
-    Submitted { id: JobId, name: String, lane: String },
+pub enum Event<'a> {
+    Submitted { id: JobId, handler: &'a str, lane: &'a str },
     Started { id: JobId, attempt: u32, worker: WorkerId },
     Completed { id: JobId, took: Duration },
-    Retrying { id: JobId, attempt: u32, after: Duration, reason: String },
-    DeadLettered { id: JobId, reason: String },
+    Retrying { id: JobId, attempt: u32, after: Duration, reason: &'a str },
+    DeadLettered { id: JobId, reason: &'a str },
+    Stale { id: JobId, worker: WorkerId },                 // a result fenced off (lease moved)
+    StoreError { during: &'static str, error: &'a StoreError },
     WorkerAdded { worker: WorkerId, reason: ScaleReason },
     WorkerRetired { worker: WorkerId, reason: ScaleReason },
     WorkerReplaced { worker: WorkerId, replacement: WorkerId, reason: RepairReason },
-    BreakerOpened { handler: String, failures: u32 },
-    BreakerClosed { handler: String },
+    BreakerOpened { handler: &'a str, failures: u32 },
+    BreakerClosed { handler: &'a str },
 }
 ```
 
-Events never carry payloads. A sink must not block; task-io calls it from the thread where the event happens.
+Events never carry payloads. A sink must not block; task-io calls it from the thread where the event happens. With no sink, an event costs one predictable branch. A sink that panics is caught; it is then skipped for the rest of the pool's life and `Health` says so, so a broken sink cannot take workers down.
 
 ---
 
@@ -310,9 +314,18 @@ pub enum Transition {
 #[non_exhaustive]
 pub enum Outcome { Applied, Stale, Duplicate { existing: JobId }, NotFound, Full, Illegal }
 pub trait Sealer: Send + Sync + 'static {
-    fn seal(&self, plain: &[u8], out: &mut Vec<u8>) -> Result<(), String>;
-    fn open(&self, sealed: &[u8], out: &mut Vec<u8>) -> Result<(), String>;
+    /// Encrypts and authenticates `plain`, bound to `aad` (the record's job
+    /// id and type, so a sealed payload cannot be moved to another record),
+    /// appending to `out`. The sealed bytes carry the key id, for rotation.
+    fn seal(&self, aad: &[u8], plain: &[u8], out: &mut Vec<u8>) -> Result<(), SealError>;
+    /// Verifies and decrypts; any change to `sealed` or `aad` is an error.
+    fn open(&self, aad: &[u8], sealed: &[u8], out: &mut Vec<u8>) -> Result<(), SealError>;
+    /// Bytes `seal` adds at most, so stores size-check before allocating.
+    fn overhead(&self) -> usize;
 }
+
+#[non_exhaustive]
+pub enum SealError { Tampered, UnknownKey, TooLarge, Other(Box<dyn std::error::Error + Send + Sync>) }
 pub trait Executor: Send + Sync + 'static {
     fn spawn(&self, job: Pin<Box<dyn Future<Output = Result<(), Fail>> + Send>>);
 }

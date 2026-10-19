@@ -18,6 +18,7 @@
 10. [Isolated workers](#10-isolated-workers)
 11. [The `unsafe` map](#11-the-unsafe-map)
 12. [The `sys/` surface](#12-the-sys-surface)
+13. [Seam contracts](#13-seam-contracts)
 
 ---
 
@@ -252,3 +253,37 @@ Write-through (`FILE_FLAG_WRITE_THROUGH`) for the durable log, if I-18 wants it,
 | S-M4 | park on a word *(pending I-04, I-34)* | `os_sync_wait_on_address`, `os_sync_wake_by_address_any` (macOS 14.4 and later), looked up with `dlsym(RTLD_DEFAULT, ..)` at start; when missing, `std::thread::park` | `os/os_sync_wait_on_address.h` |
 
 Flushing needs no FFI on any OS (section 8.2).
+
+## 13. Seam contracts
+
+*(Draft for the design lock.)* The `Store` contract and its suite are in section 8. Each other seam has the contract below and a conformance suite in `task_io::<seam>::conformance`, shipped in the library with no dependency, which an adapter runs in its own CI. `Transport` and `Membership` are specified in the `0.6.0` design.
+
+### 13.1 `EventSink`
+
+- Called on the thread where the event happens; must not block. Fields borrow from the pool (no allocation per event).
+- With no sink: one predictable branch per event site, measured by W-14 against a build with events compiled out *(I-20)*.
+- A panicking sink is caught, skipped from then on, and reported in `Health`.
+- Suite: every event kind reaches the sink with the documented fields, in the order of the transitions that cause them per job; a sink that panics on every call leaves 1,000,000 jobs unaffected (all complete, 0 lost).
+
+### 13.2 `Executor`
+
+- `spawn` takes a boxed future that resolves to the handler's result; task-io wraps it so the result reaches the store through the same transitions as a sync handler (complete, retry, dead-letter, fenced if stale).
+- The executor must poll every spawned future to completion or drop it; a dropped future is a failed attempt (its lease expires and is counted), never a silent loss.
+- Suite: 100,000 futures that complete, fail, panic, and wake from other threads; every job ends in exactly one terminal or retry state; a dropped future is retried under a new lease.
+
+### 13.3 `Sealer`
+
+Known measures, and what each costs (estimates until measured; DIRECTIVES security and performance rule):
+
+| Measure | Why | Cost |
+|---|---|---|
+| authenticated encryption only (an AEAD such as AES-256-GCM or ChaCha20-Poly1305, from an audited crate in the adapter) | confidentiality and tamper detection together | estimate: about 1 GB/s or more per core with hardware AES, so a 64-byte payload adds well under 1 us; measured by P-01 with a sealer |
+| associated data = job id and record type | a sealed payload cannot be replayed into another record | none beyond the AEAD |
+| key id in every sealed blob; several keys open, one seals | key rotation without rewriting the log | a few bytes per record |
+| `overhead()` bound | stores size-check before allocating (hostile-input rule) | none |
+| CRC-32C over the sealed bytes (section 8.2) | corruption is caught before decryption is attempted | already paid by the log |
+
+New measure proposed for R&D: **sealed checkpoints with a running MAC chain** (each segment's last record carries a MAC over the previous segment's MAC and its own records), so truncating or reordering whole segments is detected at recovery, not only damage inside a record. Hypothesis, method, and cost go into RESEARCH as I-42.
+
+Suite: round trip for sizes 0 to the record limit; every single-bit flip of a sealed blob fails to open; a changed `aad` fails; an unknown key id fails with `UnknownKey`; sealing the same plaintext twice gives different bytes (no nonce reuse); output length never exceeds `plain.len() + overhead()`.
+
