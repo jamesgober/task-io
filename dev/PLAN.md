@@ -541,6 +541,7 @@ These are James's calls. Each is written so it can be answered with one line.
 | O-7 | Name of the main type: `Pool`? | `Pool` |
 | O-8 | Names of the adapter crates. Cluster: answered 2026-10-14, `task-io-cluster` (D-021). Encryption and store-io: still open. | `task-io-crypt` (names what it plugs in, `crypt-io`), `task-io-store-io` (task-io already has its own stores, so `task-io-store` would mislead) |
 | O-9 | `background-jobs` (a listed competitor) is AGPL-3.0. Add it as a dependency of the `compare/` harness in this MIT/Apache repository, benchmark it from a separate private harness, or drop it from the competitor set? | benchmark it from a separate, private harness that is never published, so no AGPL code enters this repository's dependency graph; the competitor set is never shrunk otherwise |
+| O-10 | Several W-03 rows have competitor overhead under 0.1% (for example 0.016% for 1 ms jobs on 1 worker). A 1.20 factor there is a difference of a few thousandths of a percent, inside run-to-run noise, so no run can prove it. Keep the 1.20 gate on those rows anyway, or gate rows whose best overhead is under 0.1% at 1.0 (no worse than the best)? | gate them at 1.0 and say so in BENCHMARKS; every other W-03 row keeps 1.20. Only you can make this change (D-006) |
 
 ---
 
