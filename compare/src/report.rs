@@ -189,7 +189,12 @@ impl Report {
 
     pub fn finish(self) {
         let date = today();
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("results");
+        // The fang harness (compare/fang) shares this file and sets
+        // COMPARE_RESULTS_DIR so both write to compare/results.
+        let dir = match option_env!("COMPARE_RESULTS_DIR") {
+            Some(d) => PathBuf::from(d),
+            None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("results"),
+        };
         let raw_dir = dir.join("raw");
         let _ = std::fs::create_dir_all(&raw_dir);
         let tag = if self.quick { "-quick" } else { "" };

@@ -1,0 +1,39 @@
+# fang benchmarks for task-io (dev/BENCHMARKS.md). A separate crate because
+# fang's SQLite backend (sqlx 0.8) links a different libsqlite3-sys than
+# apalis-sqlite (sqlx 0.9), and Cargo allows only one per build. Never
+# published, never a dependency of task-io.
+[package]
+name         = "task-io-compare-fang"
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.85"
+publish      = false
+license      = "Apache-2.0 OR MIT"
+
+[workspace]
+
+[[bin]]
+name = "compare-fang"
+path = "src/main.rs"
+
+[dependencies]
+fang         = { version = "=0.11.0", default-features = false, features = ["asynk-sqlite"] }
+sqlx         = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tokio        = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+serde        = { version = "1", features = ["derive"] }
+hdrhistogram = { version = "=7.6.0", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+panic         = "unwind"
+debug         = "line-tables-only"

@@ -8,6 +8,7 @@
 
 # Benchmark and fuzz output
 /compare/target/
+/compare/fang/target/
 /compare/results/raw/
 /compare/results/*-quick.md
 /fuzz/target/
@@ -28,3 +29,4 @@ Cargo.lock
 
 # ...except the harness, whose competitor versions must stay pinned
 !/compare/Cargo.lock
+!/compare/fang/Cargo.lock

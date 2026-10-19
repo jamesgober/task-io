@@ -46,7 +46,9 @@ Results are appended to `results/<date>-<host>.md` (committed) and the raw sampl
 
 R-01, R-02, and K-01 also run against `apalis-sqlite` (retry layer with exponential backoff; idempotency keys), and P-02 kills its worker process half way and restarts it (the harness re-launches itself with `--child`; each worker process gets a unique worker name, since a restarted worker that reuses the dead one's name processes nothing until the old registration expires).
 
-Still to add: fang (its SQLite backend links a different `libsqlite3-sys` than apalis-sqlite, so it gets its own small harness crate), background-jobs (AGPL-3.0; waiting on PLAN O-9), and the P-03 stale-commit suite (absolute target, task-io only).
+`compare/fang/` is a second, smaller harness for fang (P-01, R-01): fang's SQLite backend (sqlx 0.8) links a different `libsqlite3-sys` than apalis-sqlite (sqlx 0.9), and Cargo allows one per build. It shares `report.rs`, `stats.rs`, and `sys.rs` and writes to the same `compare/results/` files. Run it with `cargo run --release -- all --host R1` from `compare/fang`. fang runs at full durability (WAL; sqlx leaves `synchronous` at SQLite's default, FULL), with a 10 ms worker sleep and its smallest backoff, 1 s.
+
+Still to add: background-jobs (AGPL-3.0; waiting on PLAN O-9), and fang on the R-02, K-01, and P-02 suites. P-03 has an absolute target only (task-io).
 
 Building on Windows: the SQLite contenders compile a bundled C library. With no MSVC compiler installed, set `CC=clang-cl` and `AR=llvm-lib` (LLVM), plus `INCLUDE` for the Windows SDK headers.
 
