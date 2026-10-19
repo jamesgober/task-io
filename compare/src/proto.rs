@@ -15,8 +15,16 @@
 //!   wakeup is lost, with at most one woken worker searching at a time;
 //! - I-05: a short spin, then yields, before a worker parks;
 //! - I-27: per-worker health counters written with plain relaxed stores.
+//!
+//! `proto-shards` is the same pool on a different queue (I-35, and the
+//! submitter half of I-03): the lane's slots are split into `SHARDS` rings,
+//! each submitting thread gets its own ring (round robin on first use), and
+//! workers drain the rings in place, starting from the one that last had
+//! work. There is no flush step, so a job never waits on its submitter.
+//! Rings stay MPMC, so threads past `SHARDS` share one safely, and a full ring
+//! spills into the next, so total capacity is unchanged.
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell as StdCell, UnsafeCell};
 use std::mem::{MaybeUninit, align_of, size_of};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -206,8 +214,100 @@ struct Health {
     panics: AtomicU64,
 }
 
-struct Shared {
-    ring: Ring,
+/// A queue the pool can run on. `cursor` is the calling worker's own state
+/// (where it last found work).
+trait JobQueue: Send + Sync + 'static {
+    fn push(&self, job: SmallJob) -> Result<(), SmallJob>;
+    fn pop(&self, cursor: &mut usize) -> Option<SmallJob>;
+    /// True when no job is waiting (a hint: it can change at once).
+    fn is_empty(&self) -> bool;
+}
+
+impl JobQueue for Ring {
+    fn push(&self, job: SmallJob) -> Result<(), SmallJob> {
+        Ring::push(self, job)
+    }
+
+    fn pop(&self, _cursor: &mut usize) -> Option<SmallJob> {
+        Ring::pop(self)
+    }
+
+    fn is_empty(&self) -> bool {
+        Ring::is_empty(self)
+    }
+}
+
+/// Number of rings in `proto-shards`.
+const SHARDS: usize = 16;
+
+static NEXT_POOL: AtomicUsize = AtomicUsize::new(1);
+
+thread_local! {
+    /// (pool id, ring index) for the last `proto-shards` pool this thread
+    /// submitted to.
+    static MY_SHARD: StdCell<(usize, usize)> = const { StdCell::new((0, 0)) };
+}
+
+struct Shards {
+    rings: Box<[Ring]>,
+    id: usize,
+    next: AtomicUsize,
+}
+
+impl Shards {
+    fn new(capacity: usize) -> Self {
+        Self {
+            rings: (0..SHARDS).map(|_| Ring::new(capacity / SHARDS)).collect(),
+            id: NEXT_POOL.fetch_add(1, Ordering::Relaxed),
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    fn my_shard(&self) -> usize {
+        MY_SHARD.with(|c| {
+            let (pool, shard) = c.get();
+            if pool == self.id {
+                shard
+            } else {
+                let shard = self.next.fetch_add(1, Ordering::Relaxed) % SHARDS;
+                c.set((self.id, shard));
+                shard
+            }
+        })
+    }
+}
+
+impl JobQueue for Shards {
+    fn push(&self, mut job: SmallJob) -> Result<(), SmallJob> {
+        let home = self.my_shard();
+        for k in 0..SHARDS {
+            match self.rings[(home + k) % SHARDS].push(job) {
+                Ok(()) => return Ok(()),
+                Err(j) => job = j,
+            }
+        }
+        Err(job)
+    }
+
+    fn pop(&self, cursor: &mut usize) -> Option<SmallJob> {
+        for k in 0..SHARDS {
+            let i = (*cursor + k) % SHARDS;
+            if let Some(job) = self.rings[i].pop() {
+                *cursor = i;
+                return Some(job);
+            }
+        }
+        None
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rings.iter().all(Ring::is_empty)
+    }
+}
+
+struct Shared<Q> {
+    queue: Q,
     /// Bit `i` set = worker `i` is parked or about to park.
     idle: Padded<AtomicU64>,
     /// Workers woken and not yet holding a job. At most one wake is in flight
@@ -218,14 +318,17 @@ struct Shared {
     stop: AtomicBool,
 }
 
-pub struct ProtoRing {
-    shared: Arc<Shared>,
+struct Pool<Q> {
+    shared: Arc<Shared<Q>>,
     handles: Vec<JoinHandle<()>>,
 }
 
+pub struct ProtoRing(Pool<Ring>);
+pub struct ProtoShards(Pool<Shards>);
+
 pub const PROTO_CAPACITY: usize = 65_536;
 
-impl Shared {
+impl<Q: JobQueue> Shared<Q> {
     /// Clears one idle bit and unparks that worker. Returns false if no
     /// worker was idle.
     #[inline]
@@ -274,14 +377,14 @@ impl Shared {
     fn stop_searching(&self) {
         self.searching.0.fetch_sub(1, Ordering::SeqCst);
         fence(Ordering::SeqCst);
-        if !self.ring.is_empty() {
+        if !self.queue.is_empty() {
             self.notify();
         }
     }
 }
 
 #[inline]
-fn run_one(shared: &Shared, me: usize, job: SmallJob) {
+fn run_one<Q>(shared: &Shared<Q>, me: usize, job: SmallJob) {
     if catch_unwind(AssertUnwindSafe(|| job.run())).is_err() {
         let h = &shared.health[me].panics;
         h.store(h.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
@@ -292,7 +395,7 @@ fn run_one(shared: &Shared, me: usize, job: SmallJob) {
 
 /// Spins, then yields, re-checking the ring between steps (I-05), before a
 /// worker parks. Returns a job if one arrived.
-fn spin_for_job(shared: &Shared) -> Option<SmallJob> {
+fn spin_for_job<Q: JobQueue>(shared: &Shared<Q>, cursor: &mut usize) -> Option<SmallJob> {
     for step in 0..10u32 {
         if step < 6 {
             for _ in 0..(1u32 << step) {
@@ -301,26 +404,27 @@ fn spin_for_job(shared: &Shared) -> Option<SmallJob> {
         } else {
             std::thread::yield_now();
         }
-        if let Some(job) = shared.ring.pop() {
+        if let Some(job) = shared.queue.pop(cursor) {
             return Some(job);
         }
     }
     None
 }
 
-fn worker(shared: Arc<Shared>, me: usize) {
+fn worker<Q: JobQueue>(shared: Arc<Shared<Q>>, me: usize) {
     let bit = 1u64 << me;
+    let mut cursor = me;
     // Woken workers start out searching (the waker counted them).
     let mut searching = false;
     loop {
-        while let Some(job) = shared.ring.pop() {
+        while let Some(job) = shared.queue.pop(&mut cursor) {
             if searching {
                 searching = false;
                 shared.stop_searching();
             }
             run_one(&shared, me, job);
         }
-        if let Some(job) = spin_for_job(&shared) {
+        if let Some(job) = spin_for_job(&shared, &mut cursor) {
             if searching {
                 searching = false;
                 shared.stop_searching();
@@ -334,7 +438,7 @@ fn worker(shared: Arc<Shared>, me: usize) {
             searching = false;
             shared.searching.0.fetch_sub(1, Ordering::SeqCst);
             fence(Ordering::SeqCst);
-            if let Some(job) = shared.ring.pop() {
+            if let Some(job) = shared.queue.pop(&mut cursor) {
                 run_one(&shared, me, job);
                 continue;
             }
@@ -347,7 +451,7 @@ fn worker(shared: Arc<Shared>, me: usize) {
         // wakes us (the park token makes an early unpark stick).
         shared.idle.0.fetch_or(bit, Ordering::SeqCst);
         fence(Ordering::SeqCst);
-        if let Some(job) = shared.ring.pop() {
+        if let Some(job) = shared.queue.pop(&mut cursor) {
             // If a waker already cleared our bit, it counted us as searching;
             // give that back, or the count leaks and nobody is woken again.
             let was_idle = shared.idle.0.fetch_and(!bit, Ordering::SeqCst) & bit != 0;
@@ -367,15 +471,13 @@ fn worker(shared: Arc<Shared>, me: usize) {
     }
 }
 
-impl Contender for ProtoRing {
-    const NAME: &'static str = "proto-ring";
-
-    fn start(workers: usize) -> Self {
+impl<Q: JobQueue> Pool<Q> {
+    fn start(workers: usize, queue: Q) -> Self {
         assert!(
             (1..=64).contains(&workers),
             "prototype supports 1 to 64 workers"
         );
-        let shared_slot: Arc<std::sync::OnceLock<Arc<Shared>>> =
+        let shared_slot: Arc<std::sync::OnceLock<Arc<Shared<Q>>>> =
             Arc::new(std::sync::OnceLock::new());
         let mut handles = Vec::with_capacity(workers);
         let mut threads = Vec::with_capacity(workers);
@@ -392,7 +494,7 @@ impl Contender for ProtoRing {
             handles.push(h);
         }
         let shared = Arc::new(Shared {
-            ring: Ring::new(PROTO_CAPACITY),
+            queue,
             idle: Padded(AtomicU64::new(0)),
             searching: Padded(AtomicUsize::new(0)),
             threads,
@@ -412,7 +514,7 @@ impl Contender for ProtoRing {
     fn spawn<F: FnOnce() + Send + 'static>(&self, f: F) {
         let mut job = SmallJob::new(f);
         loop {
-            match self.shared.ring.push(job) {
+            match self.shared.queue.push(job) {
                 Ok(()) => break,
                 Err(j) => {
                     // Full: back-pressure. Make sure someone is draining.
@@ -426,15 +528,11 @@ impl Contender for ProtoRing {
     }
 
     fn try_spawn<F: FnOnce() + Send + 'static>(&self, f: F) -> bool {
-        if self.shared.ring.push(SmallJob::new(f)).is_err() {
+        if self.shared.queue.push(SmallJob::new(f)).is_err() {
             return false;
         }
         self.shared.notify();
         true
-    }
-
-    fn reserved_bytes_per_slot() -> Option<usize> {
-        Some(size_of::<Cell>())
     }
 
     fn shutdown(self) {
@@ -447,3 +545,35 @@ impl Contender for ProtoRing {
         }
     }
 }
+
+macro_rules! proto_contender {
+    ($ty:ident, $name:literal, $queue:expr) => {
+        impl Contender for $ty {
+            const NAME: &'static str = $name;
+
+            fn start(workers: usize) -> Self {
+                Self(Pool::start(workers, $queue))
+            }
+
+            fn spawn<F: FnOnce() + Send + 'static>(&self, f: F) {
+                self.0.spawn(f)
+            }
+
+            fn try_spawn<F: FnOnce() + Send + 'static>(&self, f: F) -> bool {
+                self.0.try_spawn(f)
+            }
+
+            // Every cell is reserved at start; both queues hold PROTO_CAPACITY.
+            fn reserved_bytes_per_slot() -> Option<usize> {
+                Some(size_of::<Cell>())
+            }
+
+            fn shutdown(self) {
+                self.0.shutdown()
+            }
+        }
+    };
+}
+
+proto_contender!(ProtoRing, "proto-ring", Ring::new(PROTO_CAPACITY));
+proto_contender!(ProtoShards, "proto-shards", Shards::new(PROTO_CAPACITY));
