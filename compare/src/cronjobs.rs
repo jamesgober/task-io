@@ -47,7 +47,10 @@ impl Period {
 }
 
 fn now_ns() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 struct Lateness {
@@ -57,7 +60,10 @@ struct Lateness {
 
 impl Lateness {
     fn new() -> Arc<Self> {
-        Arc::new(Self { samples: std::sync::Mutex::new(Vec::new()), fired: AtomicU64::new(0) })
+        Arc::new(Self {
+            samples: std::sync::Mutex::new(Vec::new()),
+            fired: AtomicU64::new(0),
+        })
     }
     fn record_boundary(&self, period: Period) {
         let now = now_ns();
@@ -77,7 +83,12 @@ impl Lateness {
                 let _ = h.record(*v);
             }
         }
-        CronResult { lateness: h, fired: self.fired.load(Ordering::Relaxed), expected, cpu_ms }
+        CronResult {
+            lateness: h,
+            fired: self.fired.load(Ordering::Relaxed),
+            expected,
+            cpu_ms,
+        }
     }
 }
 

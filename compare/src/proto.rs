@@ -12,7 +12,8 @@
 //! - I-16 / I-36: closures of up to 64 bytes stored inline in the slot, so
 //!   dispatch allocates nothing;
 //! - I-04: parking with an idle-worker bitmap and thread park tokens, so no
-//!   wakeup is lost and only one sleeper is woken per job;
+//!   wakeup is lost, with at most one woken worker searching at a time;
+//! - I-05: a short spin, then yields, before a worker parks;
 //! - I-27: per-worker health counters written with plain relaxed stores.
 
 use std::cell::UnsafeCell;
@@ -157,6 +158,11 @@ impl Ring {
         }
     }
 
+    /// True when no job is waiting (a hint: it can change at once).
+    fn is_empty(&self) -> bool {
+        self.head.0.load(Ordering::SeqCst) >= self.tail.0.load(Ordering::SeqCst)
+    }
+
     fn pop(&self) -> Option<SmallJob> {
         let mut pos = self.head.0.load(Ordering::Relaxed);
         loop {
@@ -204,6 +210,9 @@ struct Shared {
     ring: Ring,
     /// Bit `i` set = worker `i` is parked or about to park.
     idle: Padded<AtomicU64>,
+    /// Workers woken and not yet holding a job. At most one wake is in flight
+    /// at a time, so a fast submitter does not make one `unpark` per job.
+    searching: Padded<AtomicUsize>,
     threads: Vec<Thread>,
     health: Box<[Health]>,
     stop: AtomicBool,
@@ -217,8 +226,10 @@ pub struct ProtoRing {
 pub const PROTO_CAPACITY: usize = 65_536;
 
 impl Shared {
+    /// Clears one idle bit and unparks that worker. Returns false if no
+    /// worker was idle.
     #[inline]
-    fn wake_one(&self) {
+    fn wake_one(&self) -> bool {
         let mut idle = self.idle.0.load(Ordering::SeqCst);
         while idle != 0 {
             let bit = idle.trailing_zeros() as usize;
@@ -230,43 +241,129 @@ impl Shared {
             ) {
                 Ok(_) => {
                     self.threads[bit].unpark();
-                    return;
+                    return true;
                 }
                 Err(v) => idle = v,
             }
         }
+        false
     }
+
+    /// Called after work was published: wakes a worker only if none is
+    /// already searching and one is idle.
+    #[inline]
+    fn notify(&self) {
+        fence(Ordering::SeqCst);
+        if self.idle.0.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if self
+            .searching
+            .0
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+            && !self.wake_one()
+        {
+            self.searching.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A woken worker found a job (or gave up): it stops searching, and, if
+    /// more work is waiting, hands the search to the next idle worker.
+    #[inline]
+    fn stop_searching(&self) {
+        self.searching.0.fetch_sub(1, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        if !self.ring.is_empty() {
+            self.notify();
+        }
+    }
+}
+
+#[inline]
+fn run_one(shared: &Shared, me: usize, job: SmallJob) {
+    if catch_unwind(AssertUnwindSafe(|| job.run())).is_err() {
+        let h = &shared.health[me].panics;
+        h.store(h.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+    }
+    let h = &shared.health[me].jobs;
+    h.store(h.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+}
+
+/// Spins, then yields, re-checking the ring between steps (I-05), before a
+/// worker parks. Returns a job if one arrived.
+fn spin_for_job(shared: &Shared) -> Option<SmallJob> {
+    for step in 0..10u32 {
+        if step < 6 {
+            for _ in 0..(1u32 << step) {
+                std::hint::spin_loop();
+            }
+        } else {
+            std::thread::yield_now();
+        }
+        if let Some(job) = shared.ring.pop() {
+            return Some(job);
+        }
+    }
+    None
 }
 
 fn worker(shared: Arc<Shared>, me: usize) {
     let bit = 1u64 << me;
+    // Woken workers start out searching (the waker counted them).
+    let mut searching = false;
     loop {
         while let Some(job) = shared.ring.pop() {
-            if catch_unwind(AssertUnwindSafe(|| job.run())).is_err() {
-                let h = &shared.health[me].panics;
-                h.store(h.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+            if searching {
+                searching = false;
+                shared.stop_searching();
             }
-            let h = &shared.health[me].jobs;
-            h.store(h.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+            run_one(&shared, me, job);
+        }
+        if let Some(job) = spin_for_job(&shared) {
+            if searching {
+                searching = false;
+                shared.stop_searching();
+            }
+            run_one(&shared, me, job);
+            continue;
+        }
+        if searching {
+            // Nothing found: give up the search, then re-check, so a job
+            // published while we were counted as searching is not stranded.
+            searching = false;
+            shared.searching.0.fetch_sub(1, Ordering::SeqCst);
+            fence(Ordering::SeqCst);
+            if let Some(job) = shared.ring.pop() {
+                run_one(&shared, me, job);
+                continue;
+            }
         }
         if shared.stop.load(Ordering::Acquire) {
             return;
         }
         // Announce idleness, then re-check: a push that happened before the
         // announcement is seen by the re-check; one after it sees the bit and
-        // unparks us (the park token makes an early unpark stick).
+        // wakes us (the park token makes an early unpark stick).
         shared.idle.0.fetch_or(bit, Ordering::SeqCst);
         fence(Ordering::SeqCst);
         if let Some(job) = shared.ring.pop() {
-            shared.idle.0.fetch_and(!bit, Ordering::SeqCst);
-            let _ = catch_unwind(AssertUnwindSafe(|| job.run()));
+            // If a waker already cleared our bit, it counted us as searching;
+            // give that back, or the count leaks and nobody is woken again.
+            let was_idle = shared.idle.0.fetch_and(!bit, Ordering::SeqCst) & bit != 0;
+            if !was_idle {
+                shared.stop_searching();
+            }
+            run_one(&shared, me, job);
             continue;
         }
         if shared.stop.load(Ordering::Acquire) {
             return;
         }
         std::thread::park();
-        shared.idle.0.fetch_and(!bit, Ordering::SeqCst);
+        // If our bit is gone, a waker cleared it and counted us as searching.
+        let was_idle = shared.idle.0.fetch_and(!bit, Ordering::SeqCst) & bit != 0;
+        searching = !was_idle;
     }
 }
 
@@ -297,6 +394,7 @@ impl Contender for ProtoRing {
         let shared = Arc::new(Shared {
             ring: Ring::new(PROTO_CAPACITY),
             idle: Padded(AtomicU64::new(0)),
+            searching: Padded(AtomicUsize::new(0)),
             threads,
             health: (0..workers)
                 .map(|_| Health {
@@ -319,25 +417,19 @@ impl Contender for ProtoRing {
                 Err(j) => {
                     // Full: back-pressure. Make sure someone is draining.
                     job = j;
-                    self.shared.wake_one();
+                    self.shared.notify();
                     std::thread::yield_now();
                 }
             }
         }
-        fence(Ordering::SeqCst);
-        if self.shared.idle.0.load(Ordering::Relaxed) != 0 {
-            self.shared.wake_one();
-        }
+        self.shared.notify();
     }
 
     fn try_spawn<F: FnOnce() + Send + 'static>(&self, f: F) -> bool {
         if self.shared.ring.push(SmallJob::new(f)).is_err() {
             return false;
         }
-        fence(Ordering::SeqCst);
-        if self.shared.idle.0.load(Ordering::Relaxed) != 0 {
-            self.shared.wake_one();
-        }
+        self.shared.notify();
         true
     }
 

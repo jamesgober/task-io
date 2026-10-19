@@ -72,7 +72,7 @@ fn parse() -> (Vec<String>, Opts) {
     if suites.is_empty() || suites.iter().any(|s| s == "all") {
         suites = [
             "W-01", "W-02", "W-03", "W-04", "W-05", "W-06", "W-08", "W-09", "W-10", "W-11", "W-12",
-            "W-13",
+            "W-13", "D-01", "D-02", "P-01",
         ]
         .map(String::from)
         .to_vec();
@@ -121,8 +121,8 @@ fn apalis_smoke(o: &Opts, r: &mut Report) {
     std::panic::set_hook(hook);
     let v = "200000 empty jobs, 1 submitter (smoke check)".to_string();
     match res {
-        Ok(secs) => r.push(Row::single("W-01", v, "apalis", 4, "wall time (in-memory backend ran; add it to the suites)", "ms", secs * 1000.0)),
-        Err(_) => r.push(Row::missing("W-01", v, "apalis", 4, "panicked in apalis-core 1.0.0 memory.rs:246 (push races the worker's poll_ready); cannot be measured")),
+        Ok(secs) => r.push(Row::single("W-01", v, "apalis", 4, "wall time (in-memory backend ran; add it to the suites)", "ms", secs * 1000.0).info()),
+        Err(_) => r.push(Row::missing("W-01", v, "apalis", 4, "panicked in apalis-core 1.0.0 memory.rs:246 (push races the worker's poll_ready); cannot be measured").info()),
     }
 }
 
@@ -232,10 +232,34 @@ fn w04(o: &Opts, r: &mut Report) {
                 format!("{jobs} queued jobs, 64-byte payload"),
                 C::NAME,
                 w,
-                "heap bytes per queued job",
+                "effective bytes per queued job (growth + start reservation / queued)",
                 "B",
-                m.heap_bytes_per_job,
+                m.effective_bytes_per_job,
             ));
+            r.push(
+                Row::single(
+                    "W-04",
+                    format!("{jobs} queued jobs, 64-byte payload"),
+                    C::NAME,
+                    w,
+                    "heap reserved at start",
+                    "B",
+                    m.reserved_at_start,
+                )
+                .info(),
+            );
+            r.push(
+                Row::single(
+                    "W-04",
+                    format!("{jobs} queued jobs, 64-byte payload"),
+                    C::NAME,
+                    w,
+                    "heap growth per queued job",
+                    "B",
+                    m.heap_bytes_per_job,
+                )
+                .info(),
+            );
             r.push(Row::single(
                 "W-04",
                 format!("{jobs} queued jobs, 64-byte payload"),
@@ -246,37 +270,46 @@ fn w04(o: &Opts, r: &mut Report) {
                 m.allocs_per_submit,
             ));
             if let Some(b) = C::reserved_bytes_per_slot() {
-                r.push(Row::single(
-                    "W-04",
-                    format!("{jobs} queued jobs, 64-byte payload"),
-                    C::NAME,
-                    w,
-                    "preallocated bytes per queue slot (count with heap bytes)",
-                    "B",
-                    b as f64,
-                ));
+                r.push(
+                    Row::single(
+                        "W-04",
+                        format!("{jobs} queued jobs, 64-byte payload"),
+                        C::NAME,
+                        w,
+                        "preallocated bytes per queue slot (count with heap bytes)",
+                        "B",
+                        b as f64,
+                    )
+                    .info(),
+                );
             }
             if m.queued < jobs {
-                r.push(Row::single(
-                    "W-04",
-                    format!("{jobs} queued jobs, 64-byte payload"),
-                    C::NAME,
-                    w,
-                    "jobs it accepted (bounded queue)",
-                    "",
-                    m.queued as f64,
-                ));
+                r.push(
+                    Row::single(
+                        "W-04",
+                        format!("{jobs} queued jobs, 64-byte payload"),
+                        C::NAME,
+                        w,
+                        "jobs it accepted (bounded queue)",
+                        "",
+                        m.queued as f64,
+                    )
+                    .info(),
+                );
             }
             if let Some(rss) = m.rss_bytes_per_job {
-                r.push(Row::single(
-                    "W-04",
-                    format!("{jobs} queued jobs, 64-byte payload"),
-                    C::NAME,
-                    w,
-                    "RSS bytes per queued job",
-                    "B",
-                    rss,
-                ));
+                r.push(
+                    Row::single(
+                        "W-04",
+                        format!("{jobs} queued jobs, 64-byte payload"),
+                        C::NAME,
+                        w,
+                        "RSS bytes per queued job",
+                        "B",
+                        rss,
+                    )
+                    .info(),
+                );
             }
         });
     }
@@ -326,13 +359,16 @@ fn w05(o: &Opts, r: &mut Report) {
                     "",
                     x,
                 )),
-                None => r.push(Row::missing(
-                    "W-05",
-                    v,
-                    C::NAME,
-                    w,
-                    "context switches per second (not exposed on this OS)",
-                )),
+                None => r.push(
+                    Row::missing(
+                        "W-05",
+                        v,
+                        C::NAME,
+                        w,
+                        "context switches per second (not exposed on this OS)",
+                    )
+                    .info(),
+                ),
             }
         });
     }
@@ -436,16 +472,19 @@ fn w08(o: &Opts, r: &mut Report) {
                 &rss,
             ));
             let refused: Vec<f64> = res.iter().map(|x| x.refused_pct).collect();
-            r.push(Row::summary(
-                "W-08",
-                v.clone(),
-                C::NAME,
-                w,
-                "refused",
-                "%",
-                false,
-                &refused,
-            ));
+            r.push(
+                Row::summary(
+                    "W-08",
+                    v.clone(),
+                    C::NAME,
+                    w,
+                    "refused",
+                    "%",
+                    false,
+                    &refused,
+                )
+                .info(),
+            );
             let hs: Vec<_> = res.into_iter().map(|x| x.admitted).collect();
             r.push(Row::latency("W-08", v, C::NAME, w, &hs));
         });
@@ -477,15 +516,7 @@ fn w09(o: &Opts, r: &mut Report) {
                 &rate,
             ));
             let lost = res.iter().map(|x| x.workers_lost).max().unwrap_or(0) as f64;
-            r.push(Row::single(
-                "W-09",
-                v,
-                C::NAME,
-                w,
-                "workers lost (worst run)",
-                "",
-                lost,
-            ));
+            r.push(Row::single("W-09", v, C::NAME, w, "workers lost (worst run)", "", lost).info());
         });
     }
     std::panic::set_hook(hook);
@@ -522,11 +553,14 @@ fn w11(o: &Opts, r: &mut Report) {
             let stop: Vec<f64> = res.iter().map(|x| x.stop_ms).collect();
             // Only a contender that ran every accepted job before stop returned
             // can set the bar; one that drops work is listed apart.
-            let kept_all = res.iter().all(|x| x.completed == x.queued);
+            // Comparable only if it held the whole queue and ran all of it.
+            let kept_all = res
+                .iter()
+                .all(|x| x.queued == queued as u64 && x.completed == x.queued);
             let metric = if kept_all {
                 "time to stop, every accepted job run"
             } else {
-                "time to stop, dropped queued jobs (not eligible)"
+                "time to stop, not eligible (dropped jobs or could not hold the queue)"
             };
             r.push(Row::summary(
                 "W-11",
@@ -540,35 +574,44 @@ fn w11(o: &Opts, r: &mut Report) {
             ));
             let ran = res.iter().map(|x| x.completed).min().unwrap_or(0) as f64;
             let q = res.iter().map(|x| x.queued).min().unwrap_or(0) as f64;
-            r.push(Row::single(
-                "W-11",
-                v.clone(),
-                C::NAME,
-                w,
-                "jobs it accepted into the queue",
-                "",
-                q,
-            ));
-            r.push(Row::single(
-                "W-11",
-                v.clone(),
-                C::NAME,
-                w,
-                "jobs run before stop returned (worst run)",
-                "",
-                ran,
-            ));
-            match res.iter().filter_map(|x| x.threads_left).max() {
-                Some(t) => r.push(Row::single(
+            r.push(
+                Row::single(
                     "W-11",
-                    v,
+                    v.clone(),
                     C::NAME,
                     w,
-                    "threads left 200 ms after stop (worst run)",
+                    "jobs it accepted into the queue",
                     "",
-                    t as f64,
-                )),
-                None => r.push(Row::missing("W-11", v, C::NAME, w, "threads left")),
+                    q,
+                )
+                .info(),
+            );
+            r.push(
+                Row::single(
+                    "W-11",
+                    v.clone(),
+                    C::NAME,
+                    w,
+                    "jobs run before stop returned (worst run)",
+                    "",
+                    ran,
+                )
+                .info(),
+            );
+            match res.iter().filter_map(|x| x.threads_left).max() {
+                Some(t) => r.push(
+                    Row::single(
+                        "W-11",
+                        v,
+                        C::NAME,
+                        w,
+                        "threads left 200 ms after stop (worst run)",
+                        "",
+                        t as f64,
+                    )
+                    .info(),
+                ),
+                None => r.push(Row::missing("W-11", v, C::NAME, w, "threads left").info()),
             }
         });
     }
@@ -599,46 +642,58 @@ fn w12_rows(r: &mut Report, v: &str, name: &'static str, res: &[stress::StepResu
     ));
     let retire: Vec<f64> = res.iter().filter_map(|x| x.retire_s).collect();
     if retire.is_empty() {
-        r.push(Row::missing(
-            "W-12",
-            v.to_string(),
-            name,
-            0,
-            "time to retire extra threads",
-        ));
+        r.push(
+            Row::missing(
+                "W-12",
+                v.to_string(),
+                name,
+                0,
+                "time to retire extra threads",
+            )
+            .info(),
+        );
     } else {
-        r.push(Row::summary(
-            "W-12",
-            v.to_string(),
-            name,
-            0,
-            "time to retire extra threads",
-            "s",
-            false,
-            &retire,
-        ));
+        r.push(
+            Row::summary(
+                "W-12",
+                v.to_string(),
+                name,
+                0,
+                "time to retire extra threads",
+                "s",
+                false,
+                &retire,
+            )
+            .info(),
+        );
     }
     if let Some(rev) = res.iter().filter_map(|x| x.reversals).max() {
-        r.push(Row::single(
-            "W-12",
-            v.to_string(),
-            name,
-            0,
-            "thread-count reversals (worst run)",
-            "",
-            rev as f64,
-        ));
+        r.push(
+            Row::single(
+                "W-12",
+                v.to_string(),
+                name,
+                0,
+                "thread-count reversals (worst run)",
+                "",
+                rev as f64,
+            )
+            .info(),
+        );
     }
     if let Some(p) = res.iter().filter_map(|x| x.peak_threads).max() {
-        r.push(Row::single(
-            "W-12",
-            v.to_string(),
-            name,
-            0,
-            "peak threads (worst run)",
-            "",
-            p as f64,
-        ));
+        r.push(
+            Row::single(
+                "W-12",
+                v.to_string(),
+                name,
+                0,
+                "peak threads (worst run)",
+                "",
+                p as f64,
+            )
+            .info(),
+        );
     }
 }
 
@@ -673,15 +728,18 @@ fn w12(o: &Opts, r: &mut Report) {
                 res.push(stress::w12::<contenders::CrossbeamPool>(size, h, &ph));
             }
             w12_rows(r, &v, "best-fixed (crossbeam-pool)", &res);
-            r.push(Row::single(
-                "W-12",
-                v.clone(),
-                "best-fixed (crossbeam-pool)",
-                0,
-                "best fixed size found",
-                "workers",
-                size as f64,
-            ));
+            r.push(
+                Row::single(
+                    "W-12",
+                    v.clone(),
+                    "best-fixed (crossbeam-pool)",
+                    0,
+                    "best fixed size found",
+                    "workers",
+                    size as f64,
+                )
+                .info(),
+            );
         }
     }
 }
@@ -761,25 +819,31 @@ fn d01(o: &Opts, r: &mut Report) {
             &can,
         ));
         let early = res.iter().map(|x| x.early).max().unwrap_or(0) as f64;
-        r.push(Row::single(
-            "D-01",
-            v.clone(),
-            name,
-            w,
-            "jobs that ran early (worst run)",
-            "",
-            early,
-        ));
+        r.push(
+            Row::single(
+                "D-01",
+                v.clone(),
+                name,
+                w,
+                "jobs that ran early (worst run)",
+                "",
+                early,
+            )
+            .info(),
+        );
         let late_cancel = res.iter().map(|x| x.fired_cancelled).max().unwrap_or(0) as f64;
-        r.push(Row::single(
-            "D-01",
-            v.clone(),
-            name,
-            w,
-            "jobs that ran after their cancel (worst run)",
-            "",
-            late_cancel,
-        ));
+        r.push(
+            Row::single(
+                "D-01",
+                v.clone(),
+                name,
+                w,
+                "jobs that ran after their cancel (worst run)",
+                "",
+                late_cancel,
+            )
+            .info(),
+        );
         let hs: Vec<_> = res.into_iter().map(|x| x.lateness).collect();
         let mut row = Row::latency("D-01", v.clone(), name, w, &hs);
         row.metric = "firing lateness".into();
@@ -811,13 +875,30 @@ fn p01(o: &Opts, r: &mut Report) {
     for subs in [1usize, 32] {
         for (sync, name) in [
             (durable::Sync::Full, "apalis-sqlite"),
-            (durable::Sync::ApalisDefault, "apalis-sqlite (default, synchronous=OFF: not power-safe)"),
+            (
+                durable::Sync::ApalisDefault,
+                "apalis-sqlite (default, synchronous=OFF: not power-safe)",
+            ),
         ] {
-            let res: Vec<_> = (0..runs).map(|_| durable::p01_apalis(&dir, sync, subs, target, time_box)).collect();
+            let res: Vec<_> = (0..runs)
+                .map(|_| durable::p01_apalis(&dir, sync, subs, target, time_box))
+                .collect();
             let n = res.iter().map(|x| x.submits).min().unwrap_or(0);
-            let v = format!("durable submits, 64-byte payload, {subs} submitter(s), up to {target} or {} s (measured {n})", time_box.as_secs());
+            let v = format!(
+                "durable submits, 64-byte payload, {subs} submitter(s), up to {target} or {} s (measured {n})",
+                time_box.as_secs()
+            );
             let rate: Vec<f64> = res.iter().map(|x| x.per_second).collect();
-            r.push(Row::summary("P-01", v.clone(), name, subs, "submits per second", "/s", true, &rate));
+            r.push(Row::summary(
+                "P-01",
+                v.clone(),
+                name,
+                subs,
+                "submits per second",
+                "/s",
+                true,
+                &rate,
+            ));
             let hs: Vec<_> = res.into_iter().map(|x| x.latency).collect();
             let mut row = Row::latency("P-01", v, name, subs, &hs);
             row.metric = "submit-to-durable latency".into();
@@ -830,16 +911,51 @@ fn d02(o: &Opts, r: &mut Report) {
     // Full protocol: 10,000 schedules firing every minute for 10 minutes.
     // Quick: 1,000 every second for 10 seconds.
     let (n, period, run_for, label) = if o.quick {
-        (1_000, cronjobs::Period::Second, Duration::from_secs(10), "every second for 10 s")
+        (
+            1_000,
+            cronjobs::Period::Second,
+            Duration::from_secs(10),
+            "every second for 10 s",
+        )
     } else {
-        (10_000, cronjobs::Period::Minute, Duration::from_secs(600), "every minute for 10 min")
+        (
+            10_000,
+            cronjobs::Period::Minute,
+            Duration::from_secs(600),
+            "every minute for 10 min",
+        )
     };
     let v = format!("{n} cron schedules, {label}");
-    let mut rows = |r: &mut Report, name: &'static str, res: cronjobs::CronResult| {
-        r.push(Row::single("D-02", v.clone(), name, 0, &format!("ticks fired (expected {})", res.expected), "", res.fired as f64));
+    let rows = |r: &mut Report, name: &'static str, res: cronjobs::CronResult| {
+        r.push(
+            Row::single(
+                "D-02",
+                v.clone(),
+                name,
+                0,
+                &format!("ticks fired (expected {})", res.expected),
+                "",
+                res.fired as f64,
+            )
+            .info(),
+        );
         match res.cpu_ms {
-            Some(c) => r.push(Row::single("D-02", v.clone(), name, 0, "CPU time over the run", "ms", c)),
-            None => r.push(Row::missing("D-02", v.clone(), name, 0, "CPU time over the run")),
+            Some(c) => r.push(Row::single(
+                "D-02",
+                v.clone(),
+                name,
+                0,
+                "CPU time over the run",
+                "ms",
+                c,
+            )),
+            None => r.push(Row::missing(
+                "D-02",
+                v.clone(),
+                name,
+                0,
+                "CPU time over the run",
+            )),
         }
         let mut row = Row::latency("D-02", v.clone(), name, 0, &[res.lateness]);
         row.metric = "firing lateness".into();

@@ -12,7 +12,7 @@ cargo run --release -- all --host R1
 
 | Option | Meaning |
 |---|---|
-| `W-01` ... `W-13`, `D-01`, or `all` | suites to run |
+| `W-01` ... `W-13`, `D-01`, `D-02`, `P-01`, or `all` | suites to run |
 | `--host R1` | host id from BENCHMARKS section 2; names the results file |
 | `--quick` | smaller workloads for checking the harness; results go to `results/*-quick.md`, which is not committed and never used for gating |
 | `--only a,b` | run only these contenders |
@@ -39,7 +39,14 @@ Results are appended to `results/<date>-<host>.md` (committed) and the raw sampl
 | `heap-scheduler` | a scheduler thread over a `BinaryHeap` with a condvar, lazy cancellation, due jobs handed to crossbeam-pool (D-01) |
 | `tokio-timer` | one tokio task per delayed job awaiting `sleep_until`, cancelled by `abort` (D-01) |
 
-Still to add: fang and background-jobs (they need serializable job types), apalis on SQLite for the durable and scheduled suites, and apalis-cron and tokio-cron-scheduler for D-02.
+| `apalis-sqlite` | apalis on SQLite (P-01), measured with `journal_mode = WAL` and `synchronous = FULL` on every connection; its own `setup()` default (`synchronous = OFF`, not power-safe) is a labelled reference row |
+| `tokio-cron` | tokio-cron-scheduler, one `Job::new_async` per schedule (D-02) |
+| `apalis-cron` | one apalis worker per schedule on a `CronScheduler` backend (D-02) |
+| `proto-ring` | **an experiment, not a competitor**: task-io's prototype dispatcher (RESEARCH I-01, I-04, I-05, I-16, I-27, I-36); its rows say "experiment" and never set the bar |
+
+Still to add: fang (its SQLite backend links a different `libsqlite3-sys` than apalis-sqlite, so it gets its own small harness crate), background-jobs (AGPL-3.0; waiting on PLAN O-9), and the R, K, P-02, and P-03 suites.
+
+Building on Windows: the SQLite contenders compile a bundled C library. With no MSVC compiler installed, set `CC=clang-cl` and `AR=llvm-lib` (LLVM), plus `INCLUDE` for the Windows SDK headers.
 
 ## How the measurements stay fair
 

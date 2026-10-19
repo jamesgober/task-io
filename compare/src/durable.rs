@@ -65,20 +65,32 @@ pub fn p01_apalis(
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let path = db_path(dir, match sync {
-        Sync::Full => "full",
-        Sync::ApalisDefault => "default",
-    });
+    let path = db_path(
+        dir,
+        match sync {
+            Sync::Full => "full",
+            Sync::ApalisDefault => "default",
+        },
+    );
     rt.block_on(async move {
-        let url = format!("sqlite://{}?mode=rwc", path.display().to_string().replace('\\', "/"));
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            path.display().to_string().replace('\\', "/")
+        );
         let base = SqliteConnectOptions::from_str(&url).expect("sqlite url");
         // Create the schema with apalis's own setup.
-        let setup_pool = SqlitePool::connect_with(base.clone()).await.expect("sqlite connect");
-        SqliteStorage::<DurableJob>::setup(&setup_pool).await.expect("apalis setup");
+        let setup_pool = SqlitePool::connect_with(base.clone())
+            .await
+            .expect("sqlite connect");
+        SqliteStorage::<()>::setup(&setup_pool)
+            .await
+            .expect("apalis setup");
         let pool = match sync {
             Sync::Full => {
                 setup_pool.close().await;
-                let opts = base.pragma("journal_mode", "WAL").pragma("synchronous", "FULL");
+                let opts = base
+                    .pragma("journal_mode", "WAL")
+                    .pragma("synchronous", "FULL");
                 SqlitePoolOptions::new()
                     .max_connections(submitters as u32)
                     .connect_with(opts)
@@ -105,7 +117,10 @@ pub fn p01_apalis(
                     if i >= target {
                         break;
                     }
-                    let job = DurableJob { i, payload: vec![(i & 0xff) as u8; 64] };
+                    let job = DurableJob {
+                        i,
+                        payload: vec![(i & 0xff) as u8; 64],
+                    };
                     let t = Instant::now();
                     if s.push(job).await.is_err() {
                         stop.store(true, Ordering::Relaxed);
@@ -128,6 +143,10 @@ pub fn p01_apalis(
         }
         let secs = t0.elapsed().as_secs_f64();
         pool.close().await;
-        DurableResult { latency: h, submits: n, per_second: n as f64 / secs }
+        DurableResult {
+            latency: h,
+            submits: n,
+            per_second: n as f64 / secs,
+        }
     })
 }
