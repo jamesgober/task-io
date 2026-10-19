@@ -280,7 +280,35 @@ Every error type is `#[non_exhaustive]`, implements `std::error::Error`, and nam
 Traits for crate authors. task-io depends on none of their implementations (PLAN D-017).
 
 ```rust
-pub trait Store: Send + Sync + 'static { /* every job state transition, group-commit capable */ }
+// Draft for the design lock: the contract and its conformance suite are in
+// ARCHITECTURE.md sections 8.1 and 8.3.
+pub trait Store: Send + Sync + 'static {
+    /// Applies a batch of transitions in order and returns once every one is
+    /// applied (memory) or on stable storage (durable). One outcome per
+    /// transition; an `Err` means the store itself failed and none of the
+    /// batch can be assumed applied.
+    fn apply(&self, batch: &[Transition], outcomes: &mut Vec<Outcome>) -> Result<(), StoreError>;
+    /// Moves up to `max` due, pending jobs of `lane` to leased, each with a
+    /// fresh token, and counts the attempt (one step per job).
+    fn lease(&self, lane: LaneId, now_ms: u64, max: usize, out: &mut Vec<Leased>) -> Result<(), StoreError>;
+    /// After a restart: every non-terminal job, leased ones back to pending.
+    fn recover(&self, each: &mut dyn FnMut(JobRecord)) -> Result<RecoveryReport, StoreError>;
+    /// The limits this store enforces (jobs, record size, dedupe window).
+    fn limits(&self) -> StoreLimits;
+}
+
+#[non_exhaustive]
+pub enum Transition {
+    Put(JobRecord),                                            // pending, or delayed until its time
+    Complete { id: JobId, token: Token },
+    Retry { id: JobId, token: Token, at_ms: u64, reason: Reason },
+    DeadLetter { id: JobId, token: Token, reason: Reason },
+    Expire { id: JobId, token: Token },                        // controller repair: back to pending
+    Cancel { id: JobId },
+}
+
+#[non_exhaustive]
+pub enum Outcome { Applied, Stale, Duplicate { existing: JobId }, NotFound, Full, Illegal }
 pub trait Sealer: Send + Sync + 'static {
     fn seal(&self, plain: &[u8], out: &mut Vec<u8>) -> Result<(), String>;
     fn open(&self, sealed: &[u8], out: &mut Vec<u8>) -> Result<(), String>;
