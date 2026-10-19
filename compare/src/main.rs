@@ -12,6 +12,7 @@ mod durable;
 mod jobs;
 mod proto;
 mod report;
+mod retries;
 mod stats;
 mod stress;
 mod sys;
@@ -72,7 +73,7 @@ fn parse() -> (Vec<String>, Opts) {
     if suites.is_empty() || suites.iter().any(|s| s == "all") {
         suites = [
             "W-01", "W-02", "W-03", "W-04", "W-05", "W-06", "W-08", "W-09", "W-10", "W-11", "W-12",
-            "W-13", "D-01", "D-02", "P-01",
+            "W-13", "D-01", "D-02", "P-01", "R-01", "R-02", "K-01",
         ]
         .map(String::from)
         .to_vec();
@@ -101,6 +102,9 @@ fn main() {
             "D-01" => d01(&o, &mut report),
             "D-02" => d02(&o, &mut report),
             "P-01" => p01(&o, &mut report),
+            "R-01" => r01(&o, &mut report),
+            "R-02" => r02(&o, &mut report),
+            "K-01" => k01(&o, &mut report),
             other => eprintln!("unknown suite {other}"),
         }
     }
@@ -967,4 +971,183 @@ fn d02(o: &Opts, r: &mut Report) {
     if o.wants("apalis-cron") {
         rows(r, "apalis-cron", cronjobs::d02_apalis(n, period, run_for));
     }
+}
+
+fn rk_dir() -> std::path::PathBuf {
+    let d = std::env::temp_dir().join("task-io-compare-rk");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+fn r01(o: &Opts, r: &mut Report) {
+    if !o.wants("apalis-sqlite") {
+        return;
+    }
+    let (n, time_box, runs) = if o.quick {
+        (2_000u64, Duration::from_secs(20), 1)
+    } else {
+        (100_000u64, Duration::from_secs(120), 3)
+    };
+    let res: Vec<_> = (0..runs)
+        .map(|_| retries::r01_apalis(&rk_dir(), n, time_box))
+        .collect();
+    let jobs = res.iter().map(|x| x.jobs).min().unwrap_or(0);
+    let v = format!("10% fail once, backoff 10 ms to 1 s, {jobs} jobs (time-boxed submit)");
+    if res.iter().all(|x| x.finished) {
+        let rate: Vec<f64> = res.iter().map(|x| x.jobs_per_s).collect();
+        r.push(Row::summary(
+            "R-01",
+            v,
+            "apalis-sqlite",
+            32,
+            "completed jobs per second",
+            "/s",
+            true,
+            &rate,
+        ));
+    } else {
+        r.push(
+            Row::missing(
+                "R-01",
+                v,
+                "apalis-sqlite",
+                32,
+                "did not finish within 10 minutes",
+            )
+            .info(),
+        );
+    }
+}
+
+fn r02(o: &Opts, r: &mut Report) {
+    if !o.wants("apalis-sqlite") {
+        return;
+    }
+    let (n, outage, time_box, runs) = if o.quick {
+        (1_000u64, Duration::from_secs(3), Duration::from_secs(20), 1)
+    } else {
+        (
+            20_000u64,
+            Duration::from_secs(10),
+            Duration::from_secs(120),
+            3,
+        )
+    };
+    let res: Vec<_> = (0..runs)
+        .map(|_| retries::r02_apalis(&rk_dir(), n, outage, time_box))
+        .collect();
+    let jobs = res.iter().map(|x| x.jobs).min().unwrap_or(0);
+    let v = format!(
+        "downstream down {} s, {jobs} jobs, 10 attempts, backoff 100 ms to 2 s",
+        outage.as_secs()
+    );
+    let waste: Vec<f64> = res
+        .iter()
+        .map(|x| x.attempts_during_outage as f64)
+        .collect();
+    r.push(Row::summary(
+        "R-02",
+        v.clone(),
+        "apalis-sqlite",
+        32,
+        "attempts made during the outage",
+        "",
+        false,
+        &waste,
+    ));
+    let drains: Vec<f64> = res.iter().filter_map(|x| x.drain_s).collect();
+    if drains.len() == res.len() {
+        r.push(Row::summary(
+            "R-02",
+            v.clone(),
+            "apalis-sqlite",
+            32,
+            "time to drain after recovery",
+            "s",
+            false,
+            &drains,
+        ));
+    } else {
+        r.push(
+            Row::missing(
+                "R-02",
+                v.clone(),
+                "apalis-sqlite",
+                32,
+                "did not drain within 10 minutes",
+            )
+            .info(),
+        );
+    }
+    let unaccounted = res
+        .iter()
+        .map(|x| x.jobs.saturating_sub(x.completed + x.dead))
+        .max()
+        .unwrap_or(0) as f64;
+    r.push(
+        Row::single(
+            "R-02",
+            v,
+            "apalis-sqlite",
+            32,
+            "jobs neither completed nor recorded as failed (worst run)",
+            "",
+            unaccounted,
+        )
+        .info(),
+    );
+}
+
+fn k01(o: &Opts, r: &mut Report) {
+    if !o.wants("apalis-sqlite") {
+        return;
+    }
+    let (n, time_box, runs) = if o.quick {
+        (2_000u64, Duration::from_secs(20), 1)
+    } else {
+        (10_000_000u64, Duration::from_secs(120), 3)
+    };
+    let res: Vec<_> = (0..runs)
+        .map(|_| retries::k01_apalis(&rk_dir(), 32, n, time_box))
+        .collect();
+    let subs = res.iter().map(|x| x.submits).min().unwrap_or(0);
+    let v = format!("32 submitters, half the keys repeated, {subs} submits (time-boxed)");
+    let keyed: Vec<f64> = res.iter().map(|x| x.ns_per_submit_keyed).collect();
+    r.push(Row::summary(
+        "K-01",
+        v.clone(),
+        "apalis-sqlite",
+        32,
+        "time per keyed submit",
+        "ns",
+        false,
+        &keyed,
+    ));
+    let plain: Vec<f64> = res.iter().map(|x| x.ns_per_submit_plain).collect();
+    r.push(
+        Row::summary(
+            "K-01",
+            v.clone(),
+            "apalis-sqlite",
+            32,
+            "time per plain submit (1 submitter, reference)",
+            "ns",
+            false,
+            &plain,
+        )
+        .info(),
+    );
+    let dups = res.iter().map(|x| x.duplicate_runs).max().unwrap_or(0) as f64;
+    r.push(
+        Row::single(
+            "K-01",
+            v,
+            "apalis-sqlite",
+            32,
+            "duplicate runs (worst run)",
+            "",
+            dups,
+        )
+        .info(),
+    );
 }

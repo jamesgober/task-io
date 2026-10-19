@@ -32,6 +32,7 @@ serde             = { version = "1", features = ["derive"] }
 apalis-cron       = "=1.0.0"
 cron              = "=0.17.0"
 tokio-cron-scheduler = "=0.15.1"
+tower             = { version = "=0.5.3", features = ["retry", "util"] }
 
 # Measurement helpers (not contenders).
 [target.'cfg(windows)'.dependencies]

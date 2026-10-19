@@ -1701,6 +1701,7 @@ dependencies = [
  "threadpool",
  "tokio",
  "tokio-cron-scheduler",
+ "tower",
  "windows-sys 0.61.2",
 ]
 
