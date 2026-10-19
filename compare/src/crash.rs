@@ -36,8 +36,10 @@ fn effects_path(dir: &Path) -> PathBuf {
 fn effects(dir: &Path) -> Vec<u64> {
     std::fs::read(effects_path(dir))
         .unwrap_or_default()
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().expect("8 bytes")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect()
 }
 
