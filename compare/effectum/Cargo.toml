@@ -1,0 +1,40 @@
+# effectum benchmarks for task-io (dev/BENCHMARKS.md). A separate crate
+# because effectum links SQLite through rusqlite 0.31 (libsqlite3-sys 0.28),
+# a different libsqlite3-sys than apalis-sqlite and fang, and Cargo allows only
+# one per build. Never published, never a dependency of task-io.
+[package]
+name         = "task-io-compare-effectum"
+version      = "0.0.0"
+edition      = "2024"
+# The harness only (task-io itself stays at 1.85); matches compare/.
+rust-version = "1.88"
+publish      = false
+license      = "Apache-2.0 OR MIT"
+
+[workspace]
+
+[[bin]]
+name = "compare-effectum"
+path = "src/main.rs"
+
+[dependencies]
+effectum     = "=0.7.0"
+# Same version effectum links, to read the database's journal mode.
+rusqlite     = "=0.31.0"
+tokio        = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+hdrhistogram = { version = "=7.6.0", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+panic         = "unwind"
+debug         = "line-tables-only"
