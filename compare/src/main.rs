@@ -6,6 +6,7 @@
 
 mod alloc;
 mod contenders;
+mod crash;
 mod cronjobs;
 mod delayed;
 mod durable;
@@ -73,7 +74,7 @@ fn parse() -> (Vec<String>, Opts) {
     if suites.is_empty() || suites.iter().any(|s| s == "all") {
         suites = [
             "W-01", "W-02", "W-03", "W-04", "W-05", "W-06", "W-08", "W-09", "W-10", "W-11", "W-12",
-            "W-13", "D-01", "D-02", "P-01", "R-01", "R-02", "K-01",
+            "W-13", "D-01", "D-02", "P-01", "P-02", "R-01", "R-02", "K-01",
         ]
         .map(String::from)
         .to_vec();
@@ -82,6 +83,12 @@ fn parse() -> (Vec<String>, Opts) {
 }
 
 fn main() {
+    // Child processes for the crash suite (P-02).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--child") {
+        crash::child(&args[1..]);
+        return;
+    }
     let (suites, o) = parse();
     let mut report = Report::new(&o.host, o.quick);
     for s in &suites {
@@ -102,6 +109,7 @@ fn main() {
             "D-01" => d01(&o, &mut report),
             "D-02" => d02(&o, &mut report),
             "P-01" => p01(&o, &mut report),
+            "P-02" => p02(&o, &mut report),
             "R-01" => r01(&o, &mut report),
             "R-02" => r02(&o, &mut report),
             "K-01" => k01(&o, &mut report),
@@ -1150,4 +1158,85 @@ fn k01(o: &Opts, r: &mut Report) {
         )
         .info(),
     );
+}
+
+fn p02(o: &Opts, r: &mut Report) {
+    if !o.wants("apalis-sqlite") {
+        return;
+    }
+    // BENCHMARKS asks for 1,000,000 pending jobs; apalis on SQLite runs a few
+    // hundred durable jobs a second, so its runs use fewer (the time-box rule)
+    // and the row says how many.
+    let (n, limit, runs) = if o.quick {
+        (2_000u64, Duration::from_secs(120), 1)
+    } else {
+        (50_000u64, Duration::from_secs(900), 3)
+    };
+    let dir = std::env::temp_dir().join("task-io-compare-p02");
+    let res: Vec<_> = (0..runs)
+        .map(|_| crash::p02_apalis(&dir, n, limit))
+        .collect();
+    let v = format!("kill -9 at half way, restart, {n} pending jobs");
+    let resumes: Vec<f64> = res.iter().filter_map(|x| x.resume_s).collect();
+    if resumes.len() == res.len() {
+        r.push(Row::summary(
+            "P-02",
+            v.clone(),
+            "apalis-sqlite",
+            32,
+            "time to resume after restart",
+            "s",
+            false,
+            &resumes,
+        ));
+    } else {
+        r.push(
+            Row::missing(
+                "P-02",
+                v.clone(),
+                "apalis-sqlite",
+                32,
+                "did not resume within the limit",
+            )
+            .info(),
+        );
+    }
+    let lost = res.iter().map(|x| x.lost).max().unwrap_or(0) as f64;
+    r.push(
+        Row::single(
+            "P-02",
+            v.clone(),
+            "apalis-sqlite",
+            32,
+            "lost jobs (worst run)",
+            "",
+            lost,
+        )
+        .info(),
+    );
+    let dups = res.iter().map(|x| x.duplicates).max().unwrap_or(0) as f64;
+    r.push(
+        Row::single(
+            "P-02",
+            v.clone(),
+            "apalis-sqlite",
+            32,
+            "duplicate effects (worst run)",
+            "",
+            dups,
+        )
+        .info(),
+    );
+    if !res.iter().all(|x| x.finished) {
+        r.push(
+            Row::missing(
+                "P-02",
+                v,
+                "apalis-sqlite",
+                32,
+                "not every job completed within the limit",
+            )
+            .info(),
+        );
+    }
 }

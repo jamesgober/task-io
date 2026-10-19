@@ -12,7 +12,7 @@ cargo run --release -- all --host R1
 
 | Option | Meaning |
 |---|---|
-| `W-01` ... `W-13`, `D-01`, `D-02`, `P-01`, `R-01`, `R-02`, `K-01`, or `all` | suites to run |
+| `W-01` ... `W-13`, `D-01`, `D-02`, `P-01`, `P-02`, `R-01`, `R-02`, `K-01`, or `all` | suites to run |
 | `--host R1` | host id from BENCHMARKS section 2; names the results file |
 | `--quick` | smaller workloads for checking the harness; results go to `results/*-quick.md`, which is not committed and never used for gating |
 | `--only a,b` | run only these contenders |
@@ -44,9 +44,9 @@ Results are appended to `results/<date>-<host>.md` (committed) and the raw sampl
 | `apalis-cron` | one apalis worker per schedule on a `CronScheduler` backend (D-02) |
 | `proto-ring` | **an experiment, not a competitor**: task-io's prototype dispatcher (RESEARCH I-01, I-04, I-05, I-16, I-27, I-36); its rows say "experiment" and never set the bar |
 
-R-01, R-02, and K-01 also run against `apalis-sqlite` (retry layer with exponential backoff; idempotency keys).
+R-01, R-02, and K-01 also run against `apalis-sqlite` (retry layer with exponential backoff; idempotency keys), and P-02 kills its worker process half way and restarts it (the harness re-launches itself with `--child`; each worker process gets a unique worker name, since a restarted worker that reuses the dead one's name processes nothing until the old registration expires).
 
-Still to add: fang (its SQLite backend links a different `libsqlite3-sys` than apalis-sqlite, so it gets its own small harness crate), background-jobs (AGPL-3.0; waiting on PLAN O-9), and the P-02 and P-03 crash suites.
+Still to add: fang (its SQLite backend links a different `libsqlite3-sys` than apalis-sqlite, so it gets its own small harness crate), background-jobs (AGPL-3.0; waiting on PLAN O-9), and the P-03 stale-commit suite (absolute target, task-io only).
 
 Building on Windows: the SQLite contenders compile a bundled C library. With no MSVC compiler installed, set `CC=clang-cl` and `AR=llvm-lib` (LLVM), plus `INCLUDE` for the Windows SDK headers.
 
