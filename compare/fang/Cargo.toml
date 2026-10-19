@@ -6,7 +6,8 @@
 name         = "task-io-compare-fang"
 version      = "0.0.0"
 edition      = "2024"
-rust-version = "1.85"
+# The harness only (task-io itself stays at 1.85); matches compare/.
+rust-version = "1.88"
 publish      = false
 license      = "Apache-2.0 OR MIT"
 

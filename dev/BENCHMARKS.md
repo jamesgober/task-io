@@ -68,6 +68,13 @@ Each results file records the exact CPU, OS build, kernel, power plan, disk (for
 | background-jobs | the `background-jobs` crate with its memory storage. It is AGPL-3.0, so it is not added to `compare/` until James decides how to measure it (PLAN O-9) |
 | tokio-cron | `tokio-cron-scheduler` (cron rows only) |
 | heap-scheduler | hand-rolled delayed-job thread on a `BinaryHeap` and a condvar (delayed rows only) |
+| affinitypool | `affinitypool` (SurrealDB) at its documented best for many producers; added by the 2026-10-19 survey (it publishes wins over tokio `spawn_blocking`, rayon, and threadpool) |
+| rusty-pool | `rusty_pool` as a fixed pool, and as an elastic pool (core at the worker count, larger max, idle retirement) for W-12 and W-13; added by the 2026-10-19 survey |
+| executors-ws | the `executors` crate's `crossbeam_workstealing_pool`, with and without its `ws-no-park` feature; added by the 2026-10-19 survey (it publishes throughput above threadpool). Finding (2026-10-19): its `shutdown` drops queued jobs (W-11: 200,000 accepted, 0 run), so it cannot set the W-11 bar |
+| kanal-pool | crossbeam-pool's design on a `kanal` channel, so the hand-rolled baseline is the fastest one available; added by the 2026-10-19 survey |
+| effectum | `effectum` on SQLite at the same durability (durable rows); added by the 2026-10-19 survey |
+| a3s-lane | `a3s-lane` with its memory backend (lanes, retries, dead letters, dedupe: the closest feature match); added by the 2026-10-19 survey |
+| graphile-worker, sqlxmq, apalis-postgres | PostgreSQL job queues, and apalis-redis on Redis, run locally at the same durability (durable rows); added by the 2026-10-19 survey. They need a local PostgreSQL and Redis, which are not installed on R1 yet |
 
 Sidekiq, Faktory, BullMQ, and Celery numbers may be quoted from their own published benchmarks for context, never as a gate.
 

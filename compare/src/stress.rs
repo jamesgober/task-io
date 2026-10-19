@@ -268,7 +268,7 @@ pub fn w06(workers: usize, measure: Duration) -> LaneResult {
                 let mut n = 0u64;
                 while !stop.load(Ordering::Relaxed) {
                     let t = Instant::now();
-                    let sample = k == 0 && n % 16 == 0;
+                    let sample = k == 0 && n.is_multiple_of(16);
                     let job: Thunk = Box::new(move || {
                         reg.with(|s| {
                             s.lane_done[k].fetch_add(1, Ordering::Relaxed);

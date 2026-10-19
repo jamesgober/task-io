@@ -26,6 +26,11 @@ pub trait Contender: Sync + Sized {
         true
     }
     fn shutdown(self);
+    /// Releases an adapter's bookkeeping for jobs that already finished (only
+    /// affinitypool keeps any: its job handles). W-04 calls it after the
+    /// warm-up batch, so that batch's handles are not freed inside the
+    /// measured one.
+    fn settle(&self) {}
     /// Bytes reserved up front per queue slot, for contenders that
     /// preallocate their queue (so W-04 counts that memory too).
     fn reserved_bytes_per_slot() -> Option<usize> {
@@ -306,6 +311,22 @@ macro_rules! for_each_contender {
         }
         {
             type $c = $crate::contenders::TokioSpawn;
+            if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
+        }
+        {
+            type $c = $crate::survey::AffinityPool;
+            if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
+        }
+        {
+            type $c = $crate::survey::RustyPool;
+            if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
+        }
+        {
+            type $c = $crate::survey::ExecutorsWs;
+            if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
+        }
+        {
+            type $c = $crate::survey::KanalPool;
             if ($filter)(<$c as $crate::contenders::Contender>::NAME) $body
         }
         {

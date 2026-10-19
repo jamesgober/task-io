@@ -113,7 +113,7 @@ async fn r01_handler(
     c: Data<Arc<Counters>>,
 ) -> Result<(), BoxDynError> {
     c.attempts.fetch_add(1, Ordering::Relaxed);
-    if job.i % 10 == 0 && attempt.current() == 0 {
+    if job.i.is_multiple_of(10) && attempt.current() == 0 {
         return Err("temporary failure (injected)".into());
     }
     c.completed.fetch_add(1, Ordering::Relaxed);

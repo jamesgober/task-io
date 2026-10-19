@@ -1,0 +1,2 @@
+# The harness only; task-io itself uses ../clippy.toml (MSRV 1.85).
+msrv = "1.88"

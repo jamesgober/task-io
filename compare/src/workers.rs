@@ -320,6 +320,7 @@ pub fn w04<C: Contender>(workers: usize, jobs: usize) -> MemResult {
     let (latch, _) = submit_batch(&pool);
     open(gate);
     latch.wait();
+    pool.settle();
     // Measured batch.
     let gate = block_workers(&pool, workers);
     let rss0 = crate::sys::resident_bytes();

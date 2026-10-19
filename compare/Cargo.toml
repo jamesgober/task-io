@@ -5,7 +5,8 @@
 name         = "task-io-compare"
 version      = "0.0.0"
 edition      = "2024"
-rust-version = "1.85"
+# The harness only (task-io itself stays at 1.85): affinitypool needs 1.88.
+rust-version = "1.88"
 publish      = false
 license      = "Apache-2.0 OR MIT"
 description  = "Benchmarks task-io's competitors by the protocol in dev/BENCHMARKS.md."
@@ -33,6 +34,16 @@ apalis-cron       = "=1.0.0"
 cron              = "=0.17.0"
 tokio-cron-scheduler = "=0.15.1"
 tower             = { version = "=0.5.3", features = ["retry", "util"] }
+# Added by the 2026-10-19 survey (BENCHMARKS section 3).
+affinitypool      = "=0.8.0"
+rusty_pool        = { version = "=1.0.0", default-features = false }
+executors         = "=0.10.0"
+kanal             = { version = "=0.1.1", default-features = false }
+
+[features]
+# executors' work-stealing pool with workers that never park; a separate build
+# because Cargo features apply to the whole build.
+ws-no-park = ["executors/ws-no-park"]
 
 # Measurement helpers (not contenders).
 [target.'cfg(windows)'.dependencies]
