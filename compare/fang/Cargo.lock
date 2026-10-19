@@ -1599,9 +1599,11 @@ version = "0.0.0"
 dependencies = [
  "fang",
  "hdrhistogram",
+ "log",
  "serde",
  "sqlx",
  "tokio",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 

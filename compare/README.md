@@ -46,9 +46,11 @@ Results are appended to `results/<date>-<host>.md` (committed) and the raw sampl
 
 R-01, R-02, and K-01 also run against `apalis-sqlite` (retry layer with exponential backoff; idempotency keys), and P-02 kills its worker process half way and restarts it (the harness re-launches itself with `--child`; each worker process gets a unique worker name, since a restarted worker that reuses the dead one's name processes nothing until the old registration expires).
 
-`compare/fang/` is a second, smaller harness for fang (P-01, R-01): fang's SQLite backend (sqlx 0.8) links a different `libsqlite3-sys` than apalis-sqlite (sqlx 0.9), and Cargo allows one per build. It shares `report.rs`, `stats.rs`, and `sys.rs` and writes to the same `compare/results/` files. Run it with `cargo run --release -- all --host R1` from `compare/fang`. fang runs at full durability (WAL; sqlx leaves `synchronous` at SQLite's default, FULL), with a 10 ms worker sleep and its smallest backoff, 1 s.
+`compare/fang/` is a second, smaller harness for fang (P-01, P-02, R-01, R-02, K-01): fang's SQLite backend (sqlx 0.8) links a different `libsqlite3-sys` than apalis-sqlite (sqlx 0.9), and Cargo allows one per build. It shares `report.rs`, `stats.rs`, and `sys.rs` and writes to the same `compare/results/` files. Run it with `cargo run --release -- all --host R1` from `compare/fang`. fang runs at full durability (WAL; sqlx leaves `synchronous` at SQLite's default, FULL), with 32 workers, a 10 ms worker sleep, and its smallest backoff, 1 s (R-02: 1 s, then 2 s).
 
-Still to add: background-jobs (AGPL-3.0; waiting on PLAN O-9), and fang on the R-02, K-01, and P-02 suites. P-03 has an absolute target only (task-io).
+fang 0.11 can run one job on two workers (it claims with a read and then a separate write), so the fang suites count distinct job ids, never raw completions, and report duplicate runs. They also report how many workers left the pool: a store error after a job (such as losing that race) ends a fang worker, and fang's pool restarts only workers that panicked (RESEARCH I-39, I-40). A run stops waiting after 60 s without progress, since a job fang left `in_progress` is never fetched again.
+
+Still to add: background-jobs (AGPL-3.0; waiting on PLAN O-9), and fang on PostgreSQL. BENCHMARKS asks for fang's fastest local backend, and until PostgreSQL is measured the SQLite rows are provisional. P-03 has an absolute target only (task-io).
 
 Building on Windows: the SQLite contenders compile a bundled C library. With no MSVC compiler installed, set `CC=clang-cl` and `AR=llvm-lib` (LLVM), plus `INCLUDE` for the Windows SDK headers.
 
