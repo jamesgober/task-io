@@ -22,6 +22,10 @@ sqlx         = { version = "0.8", default-features = false, features = ["sqlite"
 tokio        = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 serde        = { version = "1", features = ["derive"] }
 hdrhistogram = { version = "=7.6.0", default-features = false }
+# fang reports worker failures only through `log`; the harness prints them.
+log          = "=0.4.34"
+# For the logging queue wrapper (fang does not re-export it).
+uuid         = { version = "=1.26.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

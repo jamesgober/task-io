@@ -64,7 +64,7 @@ Each results file records the exact CPU, OS build, kernel, power plan, disk (for
 | best-fixed | crossbeam-pool at the fixed size that does best on that workload, found by a grid search after the fact (W-12 only: the bar an elastic pool must beat) |
 | threadpool | the `threadpool` crate |
 | apalis | apalis with its memory backend; with SQLite (WAL, `synchronous=FULL`) for durable rows; apalis-cron for cron. Finding (2026-10-14): apalis-core 1.0.0's memory backend panics when a push races the worker's `poll_ready` (`memory.rs:246`), so it cannot run under concurrent submission; the harness records that on every run until a release fixes it |
-| fang | fang with its fastest backend that runs locally |
+| fang | fang with its fastest backend that runs locally. Measured on SQLite (WAL, `synchronous=FULL`) so far; PostgreSQL is still to be measured, and the faster of the two sets the bar. Finding (2026-10-19): fang 0.11 can run one job on two workers, stores duplicate unique jobs under concurrent submits, and loses a worker for good on any store error after a job (RESEARCH section 6, I-39, I-40); the fang suites report those counts on every run |
 | background-jobs | the `background-jobs` crate with its memory storage. It is AGPL-3.0, so it is not added to `compare/` until James decides how to measure it (PLAN O-9) |
 | tokio-cron | `tokio-cron-scheduler` (cron rows only) |
 | heap-scheduler | hand-rolled delayed-job thread on a `BinaryHeap` and a condvar (delayed rows only) |
