@@ -122,7 +122,7 @@ Every step is bounded. A token mismatch at `complete`, `retry`, or `dead_letter`
 
 ### 8.1 The `Store` contract
 
-Every transition of a job is one call; each returns only after the transition is applied (memory) or durable (durable store).
+Transitions reach a store in batches through `apply` (so a durable store flushes once per batch: group commit), and leasing is its own call; both return only after every transition is applied (memory) or on stable storage (durable). The trait is drafted in `API.md`, Tier 3. The transitions:
 
 | Call | Effect |
 |---|---|
@@ -139,6 +139,11 @@ Every implementation, task-io's own and every adapter's, must also hold to these
 - **A transition is one conditional step.** `lease` moves a job from pending to leased only if it is still pending, in the same operation that reads it, so two concurrent `lease` calls never return the same job. `complete`, `retry`, `dead_letter`, and `expire` apply only if the token is current.
 - **A keyed `put` is one step.** The duplicate check and the insert happen together; there is no window between a lookup and an insert in which a second `put` with the same key gets in.
 - **A stale token is an outcome, not an error.** A transition refused because the lease moved returns a typed `Stale` result. A worker records it as an event and moves on. No store result, error or otherwise, ends a worker; a worker that ends outside shutdown is dead to the controller and is replaced.
+- **A transition touches only its own job** *(I-41)*. Every other record, and the store's counters other than the ones the transition names, are unchanged.
+- **Tokens only grow, across restarts too.** The token counter is part of the store's durable state: every token issued after `recover()` is greater than every token issued before the crash, so a result from a worker that outlived the crash is always stale.
+- **An attempt is counted when the job is leased**, not when its handler returns. A job whose handler crashes the process, or hangs until its lease expires, still uses up attempts and reaches the DLQ instead of being retried forever.
+- **Times in the store are wall-clock milliseconds since the Unix epoch** (`u64`), so they survive a restart. Lease expiry inside a running pool is judged on the monotonic clock; after a restart every lease is expired by definition (`recover()` returns leased jobs to pending).
+- **Limits are checked before anything is committed**: a `put` past the store's job limit returns `Full`, and a record past its size limit is refused before it is allocated.
 
 ### 8.2 The durable log format *(pending I-11, I-18)*
 
@@ -154,6 +159,26 @@ Every implementation, task-io's own and every adapter's, must also hold to these
 - **Recovery:** read segments from the last checkpoint; a record whose length runs past the end of the file, or whose CRC does not match, ends recovery for that segment (a torn tail from a crash) and is truncated; a bad record in the middle of a segment is reported, its job goes to the DLQ, and recovery continues with the next valid record.
 - **Compaction:** a checkpoint record lists live jobs; segments wholly before the last checkpoint are deleted.
 - **Encryption:** with a `Sealer`, the payload and fields are sealed before the CRC is computed over the sealed bytes, so corruption is caught before decryption.
+
+### 8.3 The conformance suite *(draft for the design lock)*
+
+`task_io::store::conformance::run(make_store)` runs every check below against a store built by `make_store` (a fresh one per check). task-io's memory and durable stores pass it in CI on every platform, and an adapter crate passes it in its own CI before it can be listed. The suite ships in the library and uses no dependency: its random cases come from a seeded SplitMix64 generator, and a failing case prints its seed so it can be replayed.
+
+| Check | What it proves | How |
+|---|---|---|
+| C-1 one-step lease | two leases never return the same job | 32 threads lease from one lane of 100,000 jobs until it is empty; every job leased exactly once |
+| C-2 one-step keyed put | a key inside its window is stored once | 32 threads put the same 10,000 keys; exactly one `Applied` per key, every other result `Duplicate` naming the stored job |
+| C-3 stale tokens | a moved lease cannot be completed | lease, expire, lease again; `complete`, `retry`, and `dead_letter` with the first token return `Stale`, and the record is unchanged |
+| C-4 isolation (I-41) | a transition touches only its job | 10^6 random transitions on random jobs; after each, every other record compares equal to a reference copy |
+| C-5 state machine | only legal transitions apply | random sequences against a reference model of `Pending -> Leased -> (Completed / RetryWait -> Pending / DeadLettered)`; illegal ones return a typed outcome and change nothing |
+| C-6 attempts | attempts are counted at lease | a job leased and expired `max_attempts` times without a result is dead-lettered with every reason |
+| C-7 time | a job is never leased before it is due | `retry(at)` and delayed `put`; leasing at `at - 1 ms` returns nothing, at `at` returns the job |
+| C-8 limits | bounded, refused before allocation | fill to the job limit, then `Full`; an oversized record is refused, and the allocation count does not grow for it (the suite ships `conformance::CountingAlloc`; a test binary that installs it as its global allocator gets the allocation check, one that does not gets the refusal check only) |
+| C-9 tokens across restart (durable stores) | fencing holds through a crash | issue tokens, crash, `recover()`; every new token is greater than every old one, and a pre-crash token completes nothing |
+| C-10 no lost acknowledged job (durable stores) | durability | a child process puts and transitions jobs and records each acknowledgment; it is killed at random points (10,000 seeds); after `recover()`, every acknowledged transition is present, and nothing unacknowledged is shown as completed |
+| C-11 corruption (durable stores) | hostile bytes never become jobs | random bit flips, truncations, and appended garbage in the store's files; `recover()` reports each damaged record, never panics, never returns a damaged job as valid, and keeps every undamaged one |
+| C-12 dedupe window across restart (durable stores) | a key stays refused inside its window after a crash | put with a key, crash, recover, put the key again inside the window: `Duplicate`; after the window: `Applied` |
+| C-13 group commit (durable stores) | a batch costs one flush | `apply` with 1,000 transitions issues one flush (counted through the store's flush hook) and acknowledges all of them |
 
 ## 9. Shutdown
 
