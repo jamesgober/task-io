@@ -21,7 +21,7 @@ Exit: competitor baselines measured and committed, so every target in BENCHMARKS
 
 **Step 1: the harness (first, before any prototype)**
 - [ ] `compare/` crate: its own `[workspace]`, `publish = false`, competitor versions pinned, counting allocator, latency recorder, load generator (steps, ramps, bursts), fault injector, results writer.
-- [ ] Survey: search crates.io for every job-queue and worker-pool crate; add any that could beat the listed competitors to the BENCHMARKS competitor set (never remove one).
+- [x] Survey: search crates.io for every job-queue and worker-pool crate; add any that could beat the listed competitors to the BENCHMARKS competitor set (never remove one). (2026-10-19: ten crates added to BENCHMARKS section 3.)
 - [ ] Suites W-01 to W-14, D-01 to D-02, R-01 to R-02, K-01, P-01 to P-03 implemented for every listed competitor, each at its documented best (BENCHMARKS section 3), with the best-fixed grid search for W-12.
 - [ ] Baselines measured on R1 and R2; `compare/results/<date>-R1.md` and `-R2.md` committed; BENCHMARKS section 5 filled with the best competitor and the 1.20 target per row.
 
