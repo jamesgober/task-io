@@ -104,6 +104,9 @@ jobs:
       - name: Clippy (compare)
         working-directory: compare
         run: cargo clippy --release --locked -- -D warnings
+      - name: Test (compare experiments)
+        working-directory: compare
+        run: cargo test --release --locked
       - name: Clippy (compare, ws-no-park build)
         working-directory: compare
         run: cargo clippy --release --locked --features ws-no-park -- -D warnings
