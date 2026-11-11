@@ -108,7 +108,8 @@ Every step is bounded. A token mismatch at `complete`, `retry`, or `dead_letter`
 
 ## 6. Time: delays and cron
 
-- A hierarchical timing wheel per pool with occupancy bitmaps, so the next due time is found without scanning; cancellation marks the entry and the wheel skips it.
+- A hierarchical timing wheel per pool with occupancy bitmaps (6 levels of 64 slots), so the next due time is found without scanning, and it is the earliest live deadline exactly: the timer never wakes without a job to fire. Cancellation marks the entry and the wheel skips it; cancelled entries count against the wheel's capacity until dropped, so churn cannot grow memory. Timers further out than the wheel's span wait in a binary heap and move in when they come within it, which keeps their order exact (`proto-wheel`, RESEARCH I-07).
+- Submit does not take the timer's lock: delayed jobs go to per-submitter intakes that the timer thread moves into the wheel, and a submit wakes the timer only for a deadline earlier than the one it sleeps toward *(pending I-43; with one lock per submit, `proto-wheel` lost D-01 submit to the heap scheduler)*. Cancel is one store through a handle that keeps its slot from being reused *(pending I-44)*.
 - The timer thread sleeps until the next due time with a high-resolution timer (on Windows, a high-resolution waitable timer, not a condvar timeout) *(pending I-33)*.
 - Cron: parsed once; the next fire time is computed field by field. Evaluated in UTC by default. A time zone is an explicit option; DST rule: a skipped local time runs once at the next valid time, a repeated one runs once.
 

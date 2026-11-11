@@ -210,3 +210,109 @@ pub fn d01_tokio(workers: usize, n: usize, window: Duration) -> DelayResult {
     rt.shutdown_timeout(Duration::from_secs(10));
     out.finish(submit, cancel, n, n.div_ceil(2))
 }
+
+// ---------------------------------------------------------------------------
+// proto-wheel (experiment I-07)
+// ---------------------------------------------------------------------------
+
+/// The wheel and the deadline (in ticks) the scheduler sleeps toward, so a
+/// submit wakes it only for an earlier one.
+struct WheelState {
+    wheel: crate::proto_wheel::Wheel,
+    sleeping_until: u64,
+}
+
+struct WheelShared {
+    state: Mutex<WheelState>,
+    cv: Condvar,
+    stop: AtomicBool,
+}
+
+/// `proto-wheel`: the heap scheduler's shape (one scheduler thread, a mutex
+/// and condvar, due jobs handed to crossbeam-pool) over the timing wheel of
+/// `proto_wheel.rs`, with 1 µs ticks. Deadlines round up to the next tick, so
+/// nothing fires early; cancel removes the timer by id (the heap scheduler
+/// only sets a flag and keeps the entry until it is due).
+pub fn d01_wheel(workers: usize, n: usize, window: Duration) -> DelayResult {
+    let pool = Arc::new(CrossbeamPool::start(workers));
+    let out = Outcome::new(n);
+    let cancelled: &'static [AtomicBool] =
+        Box::leak((0..n).map(|_| AtomicBool::new(false)).collect::<Box<[_]>>());
+    let ds: &'static [Duration] = Box::leak(delays(n, window).into_boxed_slice());
+    let shared: &'static WheelShared = Box::leak(Box::new(WheelShared {
+        state: Mutex::new(WheelState {
+            wheel: crate::proto_wheel::Wheel::new(n),
+            sleeping_until: u64::MAX,
+        }),
+        cv: Condvar::new(),
+        stop: AtomicBool::new(false),
+    }));
+    let t0 = Instant::now();
+    let tick = |d: Duration| d.as_nanos().div_ceil(1_000) as u64;
+    let sched = {
+        let pool = pool.clone();
+        std::thread::spawn(move || {
+            let mut g = shared.state.lock().expect("wheel");
+            loop {
+                if shared.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                // Floor: a tick counts as reached only once it has fully passed.
+                let now = (t0.elapsed().as_nanos() / 1_000) as u64;
+                g.wheel.advance(now, |_, _, i| {
+                    let i = i as usize;
+                    let due = t0 + ds[i];
+                    pool.spawn(move || out.record(i, due, cancelled[i].load(Ordering::Relaxed)));
+                });
+                match g.wheel.next_deadline() {
+                    None => {
+                        g.sleeping_until = u64::MAX;
+                        g = shared.cv.wait(g).expect("wheel");
+                    }
+                    Some(d) => {
+                        g.sleeping_until = d;
+                        let target = t0 + Duration::from_micros(d);
+                        let now = Instant::now();
+                        if target > now {
+                            g = shared.cv.wait_timeout(g, target - now).expect("wheel").0;
+                        }
+                    }
+                }
+            }
+        })
+    };
+    let mut ids = Vec::with_capacity(n);
+    let ts = Instant::now();
+    for (i, d) in ds.iter().enumerate() {
+        // The deadline relative to t0, which is taken before the loop as the
+        // other contenders take theirs.
+        let due = tick(*d);
+        let mut g = shared.state.lock().expect("wheel");
+        let id = g.wheel.insert(due, i as u64).expect("capacity is n");
+        let wake = due < g.sleeping_until;
+        if wake {
+            g.sleeping_until = due;
+        }
+        drop(g);
+        if wake {
+            shared.cv.notify_one();
+        }
+        ids.push(id);
+    }
+    let submit = ts.elapsed();
+    let tc = Instant::now();
+    for (i, id) in ids.iter().enumerate().step_by(2) {
+        cancelled[i].store(true, Ordering::Relaxed);
+        shared.state.lock().expect("wheel").wheel.cancel(*id);
+    }
+    let cancel = tc.elapsed();
+    let expected = (n - n.div_ceil(2)) as u64;
+    wait_fired(out, expected, window + Duration::from_secs(30));
+    shared.stop.store(true, Ordering::Relaxed);
+    shared.cv.notify_all();
+    let _ = sched.join();
+    if let Ok(p) = Arc::try_unwrap(pool) {
+        p.shutdown();
+    }
+    out.finish(submit, cancel, n, n.div_ceil(2))
+}
