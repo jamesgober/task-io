@@ -316,3 +316,86 @@ pub fn d01_wheel(workers: usize, n: usize, window: Duration) -> DelayResult {
     }
     out.finish(submit, cancel, n, n.div_ceil(2))
 }
+
+// ---------------------------------------------------------------------------
+// proto-wheel-intake (experiment I-43)
+// ---------------------------------------------------------------------------
+
+/// `proto-wheel-intake`: the timer thread owns the wheel with no lock;
+/// submits go through `proto_intake::Intake` (per-submitter rings, a wake only
+/// for an earlier deadline or a half ring of pushes). Cancel is the heap
+/// scheduler's flag, checked when the timer fires, so this row differs from
+/// heap-scheduler in submit only (I-44 is the cancel experiment).
+pub fn d01_wheel_intake(workers: usize, n: usize, window: Duration) -> DelayResult {
+    use crate::proto_intake::Intake;
+    let pool = Arc::new(CrossbeamPool::start(workers));
+    let out = Outcome::new(n);
+    let cancelled: &'static [AtomicBool] =
+        Box::leak((0..n).map(|_| AtomicBool::new(false)).collect::<Box<[_]>>());
+    let ds: &'static [Duration] = Box::leak(delays(n, window).into_boxed_slice());
+    let intake: &'static Intake = Box::leak(Box::new(Intake::new(16, 4096)));
+    let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+    let t0 = Instant::now();
+    let tick = |d: Duration| d.as_nanos().div_ceil(1_000) as u64;
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let sched = {
+        let pool = pool.clone();
+        std::thread::spawn(move || {
+            intake.set_timer(std::thread::current());
+            let _ = ready_tx.send(());
+            let mut wheel = crate::proto_wheel::Wheel::new(n);
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                intake.drain(|d, p| {
+                    wheel.insert(d, p).expect("capacity is n");
+                });
+                let now = (t0.elapsed().as_nanos() / 1_000) as u64;
+                wheel.advance(now, |_, _, i| {
+                    let i = i as usize;
+                    if !cancelled[i].load(Ordering::Relaxed) {
+                        let due = t0 + ds[i];
+                        pool.spawn(move || {
+                            out.record(i, due, cancelled[i].load(Ordering::Relaxed))
+                        });
+                    }
+                });
+                let next = wheel.next_deadline();
+                if !intake.sleep_toward(next) {
+                    continue; // a submit slipped in
+                }
+                match next {
+                    None => std::thread::park(),
+                    Some(d) => {
+                        let target = t0 + Duration::from_micros(d);
+                        let now = Instant::now();
+                        if target > now {
+                            std::thread::park_timeout(target - now);
+                        }
+                    }
+                }
+            }
+        })
+    };
+    let _ = ready_rx.recv();
+    let ts = Instant::now();
+    for (i, d) in ds.iter().enumerate() {
+        intake.submit(tick(*d), i as u64);
+    }
+    let submit = ts.elapsed();
+    let tc = Instant::now();
+    for c in cancelled.iter().step_by(2) {
+        c.store(true, Ordering::Relaxed);
+    }
+    let cancel = tc.elapsed();
+    let expected = (n - n.div_ceil(2)) as u64;
+    wait_fired(out, expected, window + Duration::from_secs(30));
+    stop.store(true, Ordering::Relaxed);
+    sched.thread().unpark();
+    let _ = sched.join();
+    if let Ok(p) = Arc::try_unwrap(pool) {
+        p.shutdown();
+    }
+    out.finish(submit, cancel, n, n.div_ceil(2))
+}
