@@ -51,6 +51,7 @@ Results are appended to `results/<date>-<host>.md` (committed) and the raw sampl
 | `proto-ring` | **an experiment, not a competitor**: task-io's prototype dispatcher (RESEARCH I-01, I-04, I-05, I-16, I-27, I-36); its rows say "experiment" and never set the bar |
 | `proto-shards` | **an experiment, not a competitor**: proto-ring's pool on 16 per-submitter rings drained in place by the workers (RESEARCH I-35, I-03) |
 | `proto-wheel` | **an experiment, not a competitor**: heap-scheduler's shape (one scheduler thread, a mutex and condvar, crossbeam-pool) over a hierarchical timing wheel with 1 µs ticks, exact next deadline, cancel by id (RESEARCH I-07; D-01). `I-07` runs the wheel and a binary heap alone, single-threaded, and is never gated |
+| `proto-wheel-intake` | **an experiment, not a competitor**: the same wheel owned by the timer thread with no lock; submits go to per-submitter rings and wake the timer only for an earlier deadline or every half ring of pushes (RESEARCH I-43; D-01). Cancel is heap-scheduler's flag, so the row differs from it in submit only |
 
 R-01, R-02, and K-01 also run against `apalis-sqlite` (retry layer with exponential backoff; idempotency keys), and P-02 kills its worker process half way and restarts it (the harness re-launches itself with `--child`; each worker process gets a unique worker name, since a restarted worker that reuses the dead one's name processes nothing until the old registration expires).
 
@@ -64,7 +65,7 @@ Still to add: background-jobs (AGPL-3.0; waiting on PLAN O-9); a3s-lane's priori
 
 `proto_cron.rs` is experiment I-17 (a cron parser and a field-by-field next fire time). `cargo test --release proto_cron` checks it against a minute-by-minute scan and random input; `cargo run --release -- I-17` times it against the `cron` crate and the scan (information rows, not a gated suite).
 
-`compare/models/` holds loom models of the prototypes' concurrent protocols: the wake protocol of `proto-ring` and `proto-shards`, and their ring (Vyukov's protocol, with loom's `UnsafeCell` so every cell access is checked for a race). Run them on Linux with `cargo test --release -- --test-threads=1` (about 3 minutes); on Windows, loom's deadlock report overflowed the stack. Two checks run a broken variant in a child process and pass only if loom finds the failure: the wake protocol without the lost-wakeup fix, and a ring of one cell.
+`compare/models/` holds loom models of the prototypes' concurrent protocols: the wake protocol of `proto-ring` and `proto-shards`, the intake wake protocol of `proto-wheel-intake`, and their ring (Vyukov's protocol, with loom's `UnsafeCell` so every cell access is checked for a race). Run them on Linux with `cargo test --release -- --test-threads=1` (about 3 minutes); on Windows, loom's deadlock report overflowed the stack. Three checks run a broken variant in a child process and pass only if loom finds the failure: the wake protocol without the lost-wakeup fix, the intake's timer without its re-check, and a ring of one cell.
 
 Building on Windows: the SQLite contenders compile a bundled C library. With no MSVC compiler installed, set `CC=clang-cl` and `AR=llvm-lib` (LLVM), plus `INCLUDE` for the Windows SDK headers.
 

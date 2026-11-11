@@ -7,6 +7,7 @@
 //! interleaving ends with jobs waiting and every thread parked (loom reports
 //! that as a deadlock).
 
+pub mod intake;
 pub mod ring;
 
 use loom::sync::Arc;

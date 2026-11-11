@@ -14,6 +14,8 @@ mod jobs;
 mod proto;
 // Experiment I-17; used by its tests and the I-17 timing run.
 mod proto_cron;
+// Experiment I-43: the `proto-wheel-intake` D-01 contender.
+mod proto_intake;
 // Experiment I-07: the `proto-wheel` D-01 contender.
 mod proto_wheel;
 mod report;
@@ -931,6 +933,12 @@ fn d01(o: &Opts, r: &mut Report) {
             .map(|_| delayed::d01_wheel(w, n, window))
             .collect();
         rows(r, "proto-wheel", res);
+    }
+    if o.wants("proto-wheel-intake") {
+        let res: Vec<_> = (0..runs)
+            .map(|_| delayed::d01_wheel_intake(w, n, window))
+            .collect();
+        rows(r, "proto-wheel-intake", res);
     }
 }
 
