@@ -882,6 +882,36 @@ fn i43(o: &Opts, r: &mut Report) {
     } else {
         (1_000_000, 3)
     };
+    if o.wants("proto-wheel-intake") {
+        let v = format!("{n} delayed submits, 1 thread, no timer thread");
+        let res: Vec<(f64, f64)> = (0..runs.max(5))
+            .map(|_| delayed::submit_fence_cost(n))
+            .collect();
+        for (metric, xs) in [
+            (
+                "time per submit, with the fence",
+                res.iter().map(|r| r.0).collect::<Vec<_>>(),
+            ),
+            (
+                "time per submit, without the fence (unsound)",
+                res.iter().map(|r| r.1).collect(),
+            ),
+        ] {
+            r.push(
+                Row::summary(
+                    "I-43",
+                    v.clone(),
+                    "proto-wheel-intake",
+                    1,
+                    metric,
+                    "ns",
+                    false,
+                    &xs,
+                )
+                .info(),
+            );
+        }
+    }
     for subs in [1usize, 4, 16, 32] {
         let v = format!("{n} delayed submits from {subs} submitters, none due");
         for (name, intake) in [

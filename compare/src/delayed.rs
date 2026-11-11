@@ -548,6 +548,32 @@ pub fn d01_wheel_handle(workers: usize, n: usize, window: Duration) -> DelayResu
 // I-43 submit scaling
 // ---------------------------------------------------------------------------
 
+/// Experiment I-43, the submit path alone: one thread submits `n` delayed
+/// jobs to an intake with room for all of them and no timer thread, with
+/// and without the SeqCst fence of the wake protocol. Returns ns per submit
+/// (fenced, unfenced).
+pub fn submit_fence_cost(n: usize) -> (f64, f64) {
+    use crate::proto_intake::Intake;
+    let run = |fenced: bool| {
+        let q = Intake::new(16, n.div_ceil(16));
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let t = Instant::now();
+        for k in 0..n {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let d = 3_600_000_000 + x % 10_000_000;
+            if fenced {
+                q.submit(d, k as u64);
+            } else {
+                q.submit_without_fence(d, k as u64);
+            }
+        }
+        t.elapsed().as_nanos() as f64 / n as f64
+    };
+    (run(true), run(false))
+}
+
 /// Experiment I-43, many submitters: `submitters` threads each submit their
 /// share of `n` delayed jobs due an hour out (so nothing fires and only the
 /// submit path is measured; deadlines spread over 10 s, in a different

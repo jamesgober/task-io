@@ -194,6 +194,18 @@ impl Intake {
     /// ring is full the submit waits for the timer to drain (backpressure,
     /// bounded memory).
     pub fn submit(&self, deadline: u64, payload: u64) {
+        self.submit_inner::<true>(deadline, payload);
+    }
+
+    /// `submit` without the SeqCst fence, which breaks the wake protocol
+    /// (a submit can be left in a ring while the timer sleeps). Only for
+    /// timing what the fence costs (I-43); never used by a contender.
+    pub fn submit_without_fence(&self, deadline: u64, payload: u64) {
+        self.submit_inner::<false>(deadline, payload);
+    }
+
+    #[inline]
+    fn submit_inner<const FENCE: bool>(&self, deadline: u64, payload: u64) {
         let home = self.home();
         let n = self.rings.len();
         let pushed = 'push: loop {
@@ -208,7 +220,9 @@ impl Intake {
         if let Pushed::HalfFull = pushed {
             self.wake();
         }
-        fence(Ordering::SeqCst);
+        if FENCE {
+            fence(Ordering::SeqCst);
+        }
         let mut s = self.sleeping_until.0.load(Ordering::Relaxed);
         while deadline < s {
             match self.sleeping_until.0.compare_exchange_weak(
