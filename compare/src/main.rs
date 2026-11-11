@@ -1135,6 +1135,23 @@ fn d02(o: &Opts, r: &mut Report) {
                 "CPU time over the run",
             )),
         }
+        if let Some(e) = res.early {
+            r.push(
+                Row::single(
+                    "D-02",
+                    v.clone(),
+                    name,
+                    0,
+                    "ticks run before their wall-clock time",
+                    "",
+                    e as f64,
+                )
+                .info(),
+            );
+        }
+        if let Some(w) = res.wakeups {
+            r.push(Row::single("D-02", v.clone(), name, 0, "timer wakeups", "", w as f64).info());
+        }
         let mut row = Row::latency("D-02", v.clone(), name, 0, &[res.lateness]);
         row.metric = "firing lateness".into();
         r.push(row);
@@ -1144,6 +1161,15 @@ fn d02(o: &Opts, r: &mut Report) {
     }
     if o.wants("apalis-cron") {
         rows(r, "apalis-cron", cronjobs::d02_apalis(n, period, run_for));
+    }
+    if o.wants("proto-cron") {
+        if o.quick {
+            eprintln!(
+                "  proto-cron: five-field cron has no seconds; it runs in the full protocol only"
+            );
+        } else {
+            rows(r, "proto-cron", cronjobs::d02_proto(n, run_for));
+        }
     }
 }
 
