@@ -22,6 +22,9 @@ pub struct DelayResult {
     pub lateness: hdrhistogram::Histogram<u64>,
     pub early: u64,
     pub fired_cancelled: u64,
+    /// Time per cancel-handle drop, for contenders whose handle does work
+    /// when dropped (`proto-wheel-handle`); not part of submit or cancel.
+    pub ns_per_drop: Option<f64>,
 }
 
 /// Delays spread uniformly over `window`, in a fixed pseudo-random order.
@@ -82,6 +85,7 @@ impl Outcome {
             lateness: h,
             early: self.early.load(Ordering::Relaxed),
             fired_cancelled: self.fired_cancelled.load(Ordering::Relaxed),
+            ns_per_drop: None,
         }
     }
 }
@@ -398,4 +402,102 @@ pub fn d01_wheel_intake(workers: usize, n: usize, window: Duration) -> DelayResu
         p.shutdown();
     }
     out.finish(submit, cancel, n, n.div_ceil(2))
+}
+
+// ---------------------------------------------------------------------------
+// proto-wheel-handle (experiment I-44)
+// ---------------------------------------------------------------------------
+
+/// `proto-wheel-handle`: `proto-wheel-intake` with a real cancel. Each submit
+/// takes a slot (`proto_cancel::Slots`) and returns a handle that pins it;
+/// cancel is one release store into the slot, which the timer checks before
+/// handing the job to a worker and the worker checks again before running.
+/// The slot is freed when both the handle and the timer side let go, so a
+/// cancel can never land on a reused slot. Handle drop (one RMW) is timed
+/// separately.
+pub fn d01_wheel_handle(workers: usize, n: usize, window: Duration) -> DelayResult {
+    use crate::proto_cancel::{Handle, Slots};
+    use crate::proto_intake::Intake;
+    let pool = Arc::new(CrossbeamPool::start(workers));
+    let out = Outcome::new(n);
+    let ds: &'static [Duration] = Box::leak(delays(n, window).into_boxed_slice());
+    let intake: &'static Intake = Box::leak(Box::new(Intake::new(16, 4096)));
+    let slots: &'static Slots = Box::leak(Box::new(Slots::new(n)));
+    let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+    let t0 = Instant::now();
+    let tick = |d: Duration| d.as_nanos().div_ceil(1_000) as u64;
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let sched = {
+        let pool = pool.clone();
+        std::thread::spawn(move || {
+            intake.set_timer(std::thread::current());
+            let _ = ready_tx.send(());
+            let mut wheel = crate::proto_wheel::Wheel::new(n);
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                intake.drain(|d, p| {
+                    wheel.insert(d, p).expect("capacity is n");
+                });
+                let now = (t0.elapsed().as_nanos() / 1_000) as u64;
+                wheel.advance(now, |_, _, p| {
+                    let slot = (p >> 32) as u32;
+                    let i = (p & 0xffff_ffff) as usize;
+                    if slots.is_cancelled(slot) {
+                        slots.release(slot);
+                    } else {
+                        let due = t0 + ds[i];
+                        // The timer's pin moves to the job.
+                        pool.spawn(move || {
+                            out.record(i, due, slots.is_cancelled(slot));
+                            slots.release(slot);
+                        });
+                    }
+                });
+                let next = wheel.next_deadline();
+                if !intake.sleep_toward(next) {
+                    continue;
+                }
+                match next {
+                    None => std::thread::park(),
+                    Some(d) => {
+                        let target = t0 + Duration::from_micros(d);
+                        let now = Instant::now();
+                        if target > now {
+                            std::thread::park_timeout(target - now);
+                        }
+                    }
+                }
+            }
+        })
+    };
+    let _ = ready_rx.recv();
+    let mut handles = Vec::with_capacity(n);
+    let ts = Instant::now();
+    for (i, d) in ds.iter().enumerate() {
+        let slot = slots.alloc().expect("capacity is n");
+        intake.submit(tick(*d), (u64::from(slot) << 32) | i as u64);
+        handles.push(Handle::new(slots, slot));
+    }
+    let submit = ts.elapsed();
+    let tc = Instant::now();
+    for h in handles.iter().step_by(2) {
+        h.cancel();
+    }
+    let cancel = tc.elapsed();
+    let td = Instant::now();
+    drop(handles);
+    let dropped = td.elapsed();
+    let expected = (n - n.div_ceil(2)) as u64;
+    wait_fired(out, expected, window + Duration::from_secs(30));
+    stop.store(true, Ordering::Relaxed);
+    sched.thread().unpark();
+    let _ = sched.join();
+    if let Ok(p) = Arc::try_unwrap(pool) {
+        p.shutdown();
+    }
+    let mut r = out.finish(submit, cancel, n, n.div_ceil(2));
+    r.ns_per_drop = Some(dropped.as_nanos() as f64 / n as f64);
+    r
 }

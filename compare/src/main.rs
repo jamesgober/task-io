@@ -14,6 +14,8 @@ mod jobs;
 mod proto;
 // Experiment I-17; used by its tests and the I-17 timing run.
 mod proto_cron;
+// Experiment I-44: the cancel handle of the `proto-wheel-handle` D-01 contender.
+mod proto_cancel;
 // Experiment I-43: the `proto-wheel-intake` D-01 contender.
 mod proto_intake;
 // Experiment I-07: the `proto-wheel` D-01 contender.
@@ -913,6 +915,22 @@ fn d01(o: &Opts, r: &mut Report) {
             )
             .info(),
         );
+        let drops: Vec<f64> = res.iter().filter_map(|x| x.ns_per_drop).collect();
+        if !drops.is_empty() {
+            r.push(
+                Row::summary(
+                    "D-01",
+                    v.clone(),
+                    name,
+                    w,
+                    "time per handle drop",
+                    "ns",
+                    false,
+                    &drops,
+                )
+                .info(),
+            );
+        }
         let hs: Vec<_> = res.into_iter().map(|x| x.lateness).collect();
         let mut row = Row::latency("D-01", v.clone(), name, w, &hs);
         row.metric = "firing lateness".into();
@@ -939,6 +957,12 @@ fn d01(o: &Opts, r: &mut Report) {
             .map(|_| delayed::d01_wheel_intake(w, n, window))
             .collect();
         rows(r, "proto-wheel-intake", res);
+    }
+    if o.wants("proto-wheel-handle") {
+        let res: Vec<_> = (0..runs)
+            .map(|_| delayed::d01_wheel_handle(w, n, window))
+            .collect();
+        rows(r, "proto-wheel-handle", res);
     }
 }
 
