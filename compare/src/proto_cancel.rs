@@ -74,14 +74,29 @@ impl Slots {
     }
 
     fn with_cache<R>(&'static self, f: impl FnOnce(&mut Cache) -> R) -> R {
-        CACHE.with(|c| {
+        let mut f = Some(f);
+        let r = CACHE.try_with(|c| {
             let mut c = c.borrow_mut();
             if !c.slots.is_some_and(|s| std::ptr::eq(s, self)) {
                 c.flush();
                 c.slots = Some(self);
             }
-            f(&mut c)
-        })
+            (f.take().expect("called once"))(&mut c)
+        });
+        match r {
+            Ok(r) => r,
+            // The thread's cache is already gone (a handle dropped from
+            // another thread-local destructor): use a cache of one call,
+            // flushed to the shared list when it drops.
+            Err(_) => {
+                let mut c = Cache {
+                    slots: Some(self),
+                    take: Vec::new(),
+                    back: Vec::new(),
+                };
+                (f.take().expect("called once"))(&mut c)
+            }
+        }
     }
 
     /// A fresh slot pinned twice (handle and timer side).
