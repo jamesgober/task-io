@@ -14,6 +14,8 @@ mod jobs;
 mod proto;
 // Experiment I-17; used by its tests and the I-17 timing run.
 mod proto_cron;
+// Experiment I-07: the `proto-wheel` D-01 contender.
+mod proto_wheel;
 mod report;
 mod retries;
 mod stats;
@@ -110,6 +112,7 @@ fn main() {
             "W-12" => w12(&o, &mut report),
             "W-13" => w13(&o, &mut report),
             "D-01" => d01(&o, &mut report),
+            "I-07" => i07(&o, &mut report),
             "D-02" => d02(&o, &mut report),
             "I-17" => i17(&o, &mut report),
             "P-01" => p01(&o, &mut report),
@@ -812,6 +815,42 @@ fn w13(o: &Opts, r: &mut Report) {
     }
 }
 
+/// Experiment I-07 (dev/RESEARCH.md): the timing wheel and a binary heap
+/// alone, single-threaded, on D-01's shape (1 µs ticks, deadlines over the
+/// window, half cancelled, time advanced in 1 ms steps). Not a gated suite;
+/// it shows where D-01's cost goes.
+fn i07(o: &Opts, r: &mut Report) {
+    let (n, runs) = if o.quick {
+        (100_000, 3)
+    } else {
+        (1_000_000, 10)
+    };
+    let window = 10_000_000; // 10 s in µs
+    let step = 1_000;
+    let v = format!("{n} timers over 10 s, 50% cancelled, 1 ms steps");
+    let rows = |r: &mut Report, name: &'static str, res: Vec<proto_wheel::Micro>| {
+        for (metric, f) in [
+            (
+                "time per insert",
+                (|m: &proto_wheel::Micro| m.insert) as fn(&_) -> f64,
+            ),
+            ("time per cancel", |m| m.cancel),
+            ("drain time per fired timer", |m| m.drain),
+        ] {
+            let xs: Vec<f64> = res.iter().map(f).collect();
+            r.push(Row::summary("I-07", v.clone(), name, 1, metric, "ns", false, &xs).info());
+        }
+    };
+    let res = (0..runs)
+        .map(|_| proto_wheel::micro_wheel(n, window, step))
+        .collect();
+    rows(r, "proto-wheel", res);
+    let res = (0..runs)
+        .map(|_| proto_wheel::micro_heap(n, window, step))
+        .collect();
+    rows(r, "binary-heap", res);
+}
+
 fn d01(o: &Opts, r: &mut Report) {
     let (n, window, runs) = if o.quick {
         (100_000, Duration::from_secs(2), 1)
@@ -886,6 +925,12 @@ fn d01(o: &Opts, r: &mut Report) {
             .map(|_| delayed::d01_tokio(w, n, window))
             .collect();
         rows(r, "tokio-timer", res);
+    }
+    if o.wants("proto-wheel") {
+        let res: Vec<_> = (0..runs)
+            .map(|_| delayed::d01_wheel(w, n, window))
+            .collect();
+        rows(r, "proto-wheel", res);
     }
 }
 
