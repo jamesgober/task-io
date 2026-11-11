@@ -12,6 +12,8 @@ mod delayed;
 mod durable;
 mod jobs;
 mod proto;
+// Experiment I-17; used by its tests and the I-17 timing run.
+mod proto_cron;
 mod report;
 mod retries;
 mod stats;
@@ -109,6 +111,7 @@ fn main() {
             "W-13" => w13(&o, &mut report),
             "D-01" => d01(&o, &mut report),
             "D-02" => d02(&o, &mut report),
+            "I-17" => i17(&o, &mut report),
             "P-01" => p01(&o, &mut report),
             "P-02" => p02(&o, &mut report),
             "R-01" => r01(&o, &mut report),
@@ -928,6 +931,79 @@ fn p01(o: &Opts, r: &mut Report) {
             let mut row = Row::latency("P-01", v, name, subs, &hs);
             row.metric = "submit-to-durable latency".into();
             r.push(row);
+        }
+    }
+}
+
+/// Experiment I-17 (dev/RESEARCH.md): the cost of computing a cron
+/// schedule's next fire time. Not a gated suite; rows are information.
+fn i17(o: &Opts, r: &mut Report) {
+    use std::hint::black_box;
+    use std::str::FromStr;
+    use std::time::Instant;
+
+    let (n, runs) = if o.quick { (20_000, 1) } else { (200_000, 3) };
+    let starts = proto_cron::start_times(n, 17);
+    for e in proto_cron::TIMED {
+        let ours = proto_cron::Cron::parse(e).expect("timed expression");
+        // The cron crate's grammar has a seconds field first.
+        let theirs = cron::Schedule::from_str(&format!("0 {e}")).expect("cron crate expression");
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        let mut c = Vec::new();
+        let scan_n = n / 100;
+        for _ in 0..runs {
+            let t = Instant::now();
+            for &s in &starts {
+                black_box(ours.next_after(black_box(s)));
+            }
+            a.push(t.elapsed().as_nanos() as f64 / n as f64);
+            let t = Instant::now();
+            for &s in &starts {
+                let dt = chrono::DateTime::from_timestamp(s, 0).expect("time");
+                black_box(theirs.after(&dt).next());
+            }
+            b.push(t.elapsed().as_nanos() as f64 / n as f64);
+            let t = Instant::now();
+            for &s in &starts[..scan_n] {
+                black_box(proto_cron::scan_after(&ours, black_box(s), 9 * 366 * 1440));
+            }
+            c.push(t.elapsed().as_nanos() as f64 / scan_n as f64);
+        }
+        // Same answers, or the timing means nothing. The cron crate stops
+        // at the end of 2099 (it returned nothing for `0 0 29 2 *` after
+        // January 2099, whose next fire is 2104-02-29), so past that only
+        // ours must still answer.
+        let end_2099 = 4_102_444_800;
+        for &s in starts.iter().take(1_000) {
+            let dt = chrono::DateTime::from_timestamp(s, 0).expect("time");
+            match theirs.after(&dt).next().map(|d| d.timestamp()) {
+                Some(want) => assert_eq!(ours.next_after(s), Some(want), "{e} after {s}"),
+                None => assert!(
+                    ours.next_after(s).is_some_and(|t| t >= end_2099),
+                    "{e} after {s}"
+                ),
+            }
+        }
+        let v = format!("next fire time of `{e}`, {n} random start times");
+        for (name, xs) in [
+            ("proto-cron", &a),
+            ("cron-crate", &b),
+            ("proto-cron-scan", &c),
+        ] {
+            r.push(
+                Row::summary(
+                    "I-17",
+                    v.clone(),
+                    name,
+                    1,
+                    "time per next fire",
+                    "ns",
+                    false,
+                    xs,
+                )
+                .info(),
+            );
         }
     }
 }
