@@ -472,7 +472,7 @@ mod tests {
     /// scan on random expressions and random start times.
     #[test]
     fn matches_brute_force() {
-        let mut r = Rng(0x5eed_17);
+        let mut r = Rng(0x005e_ed17);
         let horizon = 9 * 366 * 24 * 60; // past the longest leap-year gap (8 years)
         let mut checked = 0;
         while checked < 1_500 {
