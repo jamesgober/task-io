@@ -20,6 +20,8 @@ mod proto_cancel;
 mod proto_crc;
 // Experiment I-43: the `proto-wheel-intake` D-01 contender.
 mod proto_intake;
+// Experiments I-11, I-18 (and I-28's P-01 test): the `proto-log` P-01 contender.
+mod proto_log;
 // Experiment I-07: the `proto-wheel` D-01 contender.
 mod proto_wheel;
 mod report;
@@ -1107,10 +1109,158 @@ fn p01(o: &Opts, r: &mut Report) {
     };
     let dir = std::env::temp_dir().join("task-io-compare-p01");
     let _ = std::fs::create_dir_all(&dir);
-    if !o.wants("apalis-sqlite") {
-        return;
-    }
     for subs in [1usize, 32] {
+        for (opts, name) in [
+            (
+                proto_log::Options {
+                    prealloc: None,
+                    checksum: true,
+                    write_through: false,
+                    auto: false,
+                },
+                "proto-log",
+            ),
+            (
+                proto_log::Options {
+                    prealloc: Some(0),
+                    checksum: true,
+                    write_through: false,
+                    auto: false,
+                },
+                "proto-log-prealloc",
+            ),
+            (
+                proto_log::Options {
+                    prealloc: Some(0),
+                    checksum: true,
+                    write_through: true,
+                    auto: false,
+                },
+                "proto-log-write-through",
+            ),
+            (
+                proto_log::Options {
+                    prealloc: Some(0),
+                    checksum: true,
+                    write_through: false,
+                    auto: true,
+                },
+                "proto-log-auto",
+            ),
+            (
+                proto_log::Options {
+                    prealloc: Some(0),
+                    checksum: false,
+                    write_through: false,
+                    auto: false,
+                },
+                "proto-log-prealloc-nocrc",
+            ),
+        ] {
+            if !o.wants(name) {
+                continue;
+            }
+            let res: Vec<_> = (0..runs)
+                .map(|_| proto_log::p01(&dir, opts, subs, target, time_box).expect("proto-log"))
+                .collect();
+            let n = res.iter().map(|x| x.submits).min().unwrap_or(0);
+            let v = format!(
+                "durable submits, 64-byte payload, {subs} submitter(s), up to {target} or {} s (measured {n})",
+                time_box.as_secs()
+            );
+            let rate: Vec<f64> = res.iter().map(|x| x.per_second).collect();
+            r.push(Row::summary(
+                "P-01",
+                v.clone(),
+                name,
+                subs,
+                "submits per second",
+                "/s",
+                true,
+                &rate,
+            ));
+            let per: Vec<f64> = res
+                .iter()
+                .map(|x| x.submits as f64 / x.flushes.max(1) as f64)
+                .collect();
+            r.push(
+                Row::summary(
+                    "P-01",
+                    v.clone(),
+                    name,
+                    subs,
+                    "records per flush",
+                    "",
+                    true,
+                    &per,
+                )
+                .info(),
+            );
+            if opts.auto {
+                let wt: Vec<f64> = res
+                    .iter()
+                    .map(|x| f64::from(u8::from(x.write_through)))
+                    .collect();
+                r.push(
+                    Row::summary(
+                        "P-01",
+                        v.clone(),
+                        name,
+                        subs,
+                        "write-through chosen (share of runs)",
+                        "",
+                        true,
+                        &wt,
+                    )
+                    .info(),
+                );
+                let ms: Vec<f64> = res
+                    .iter()
+                    .filter_map(|x| x.probe)
+                    .map(|p| p.took.as_secs_f64() * 1000.0)
+                    .collect();
+                r.push(
+                    Row::summary(
+                        "P-01",
+                        v.clone(),
+                        name,
+                        subs,
+                        "flush probe time at open",
+                        "ms",
+                        false,
+                        &ms,
+                    )
+                    .info(),
+                );
+                for (metric, f) in [
+                    (
+                        "probe: one block by sync_data",
+                        (|p: &proto_log::Probe| Some(p.sync_ns))
+                            as fn(&proto_log::Probe) -> Option<u64>,
+                    ),
+                    ("probe: one block write-through", |p| p.write_through_ns),
+                ] {
+                    let us: Vec<f64> = res
+                        .iter()
+                        .filter_map(|x| x.probe.as_ref().and_then(f))
+                        .map(|ns| ns as f64 / 1000.0)
+                        .collect();
+                    if !us.is_empty() {
+                        r.push(
+                            Row::summary("P-01", v.clone(), name, subs, metric, "us", false, &us)
+                                .info(),
+                        );
+                    }
+                }
+            }
+            let hs: Vec<_> = res.into_iter().map(|x| x.latency).collect();
+            let mut row = Row::latency("P-01", v, name, subs, &hs);
+            row.metric = "submit-to-durable latency".into();
+            r.push(row);
+        }
+        if !o.wants("apalis-sqlite") {
+            continue;
+        }
         for (sync, name) in [
             (durable::Sync::Full, "apalis-sqlite"),
             (

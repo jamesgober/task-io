@@ -239,6 +239,23 @@ pub fn crc32c_sse42_3way(data: &[u8]) -> u32 {
     !unsafe { x86::raw3(!0, data) }
 }
 
+/// The version task-io would pick: three streams of the instruction where
+/// the CPU has it (one stream below 384 bytes), slicing-by-8 otherwise.
+pub fn crc32c_best(data: &[u8]) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    if has_sse42() {
+        // SAFETY: SSE 4.2 is present (checked above).
+        return !unsafe {
+            if data.len() < 3 * SHORT {
+                x86::raw1(!0, data)
+            } else {
+                x86::raw3(!0, data)
+            }
+        };
+    }
+    crc32c_portable(data)
+}
+
 /// How long each version takes per checksum of `size` bytes, over about
 /// `total` bytes: `(name, ns per checksum)`. The buffer is random and stays
 /// in cache for the sizes a record has (up to 64 KiB).
@@ -344,6 +361,7 @@ mod tests {
                     assert_eq!(crc32c_sse42(d), want, "sse42, len {len} off {off}");
                     assert_eq!(crc32c_sse42_3way(d), want, "3way, len {len} off {off}");
                 }
+                assert_eq!(crc32c_best(d), want, "best, len {len} off {off}");
             }
         }
     }
