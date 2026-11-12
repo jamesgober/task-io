@@ -5,8 +5,9 @@
 name         = "task-io-compare"
 version      = "0.0.0"
 edition      = "2024"
-# The harness only (task-io itself stays at 1.85): affinitypool needs 1.88.
-rust-version = "1.88"
+# The harness only (task-io itself stays at 1.85): affinitypool needs 1.88,
+# crc-fast 1.89.
+rust-version = "1.89"
 publish      = false
 license      = "Apache-2.0 OR MIT"
 description  = "Benchmarks task-io's competitors by the protocol in dev/BENCHMARKS.md."
@@ -46,6 +47,9 @@ serde_json        = "1"
 # I-17 timing against the cron crate, which takes chrono times (same version
 # as in the lock).
 chrono            = { version = "=0.4.45", default-features = false, features = ["clock"] }
+# I-28: CRC-32C crates with hardware paths, measured against the prototype.
+crc32c            = "=0.6.9"
+crc-fast          = "=1.10.0"
 
 [features]
 # executors' work-stealing pool with workers that never park; a separate build

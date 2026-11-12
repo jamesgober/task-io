@@ -16,13 +16,15 @@ mod proto;
 mod proto_cron;
 // Experiment I-44: the cancel handle of the `proto-wheel-handle` D-01 contender.
 mod proto_cancel;
+// Experiment I-28: CRC-32C for durable records.
+mod proto_crc;
 // Experiment I-43: the `proto-wheel-intake` D-01 contender.
 mod proto_intake;
 // Experiment I-07: the `proto-wheel` D-01 contender.
 mod proto_wheel;
 mod report;
-// Experiment I-33: sleep lateness by primitive.
 mod retries;
+// Experiment I-33: sleep lateness by primitive.
 mod sleep_probe;
 mod stats;
 mod stress;
@@ -119,6 +121,7 @@ fn main() {
             "W-13" => w13(&o, &mut report),
             "D-01" => d01(&o, &mut report),
             "I-07" => i07(&o, &mut report),
+            "I-28" => i28(&o, &mut report),
             "I-33" => i33(&o, &mut report),
             "I-43" => i43(&o, &mut report),
             "D-02" => d02(&o, &mut report),
@@ -857,6 +860,41 @@ fn i07(o: &Opts, r: &mut Report) {
         .map(|_| proto_wheel::micro_heap(n, window, step))
         .collect();
     rows(r, "binary-heap", res);
+}
+
+/// Experiment I-28 (dev/RESEARCH.md): CRC-32C per record size, the
+/// prototype's versions against the crc32c and crc-fast crates, in cache.
+/// Not a gated suite; the gate is P-01 with and without checksums.
+fn i28(o: &Opts, r: &mut Report) {
+    let (total, runs) = if o.quick {
+        (16 << 20, 3)
+    } else {
+        (256 << 20, 10)
+    };
+    for size in [16usize, 64, 256, 1024, 4096, 65_536] {
+        let v = format!("CRC-32C of {size} bytes, in cache");
+        let res: Vec<Vec<(&'static str, f64)>> =
+            (0..runs).map(|_| proto_crc::micro(size, total)).collect();
+        for (k, (name, _)) in res[0].iter().enumerate() {
+            if !o.wants(name) {
+                continue;
+            }
+            let xs: Vec<f64> = res.iter().map(|run| run[k].1).collect();
+            r.push(
+                Row::summary(
+                    "I-28",
+                    v.clone(),
+                    name,
+                    1,
+                    "time per checksum",
+                    "ns",
+                    false,
+                    &xs,
+                )
+                .info(),
+            );
+        }
+    }
 }
 
 /// Experiment I-33 (dev/RESEARCH.md): how late a timed sleep wakes, by
