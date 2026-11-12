@@ -6,6 +6,7 @@
 //!   one `JobScheduler` (its README and docs).
 //! - `apalis-cron`: one apalis worker per schedule with a `CronScheduler`
 //!   backend (apalis-cron README, "Using `cron` crate").
+//! - `proto-cron`: an experiment, not a competitor (`d02_proto`).
 //!
 //! Lateness is measured from the scheduled boundary: apalis gives the tick's
 //! timestamp; for tokio-cron-scheduler the boundary is the start of the
@@ -22,6 +23,12 @@ pub struct CronResult {
     pub fired: u64,
     pub expected: u64,
     pub cpu_ms: Option<f64>,
+    /// How many times the timer thread woke (`proto-cron` only).
+    pub wakeups: Option<u64>,
+    /// Ticks whose job ran before their wall-clock time (`proto-cron` only;
+    /// the competitors' lateness is measured from the boundary, which cannot
+    /// show it).
+    pub early: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -88,6 +95,8 @@ impl Lateness {
             fired: self.fired.load(Ordering::Relaxed),
             expected,
             cpu_ms,
+            wakeups: None,
+            early: None,
         }
     }
 }
@@ -167,4 +176,98 @@ pub fn d02_apalis(schedules: usize, period: Period, run_for: Duration) -> CronRe
         let c1 = cpu();
         late.finish(expected, cpu_ms(c0, c1))
     })
+}
+
+/// `proto-cron` (experiments I-17 and I-07): every schedule parsed once by
+/// `proto_cron`, its next fire time kept in the `proto_wheel` timing wheel
+/// (1 ms ticks) on one timer thread, which sleeps until the earliest one and
+/// hands each due tick to crossbeam-pool (4 workers, as tokio-cron's
+/// runtime has). Five-field cron has no seconds field, so this row runs only
+/// in the full protocol (every minute). Also reports how often the timer
+/// thread woke, to check I-17's claim that it wakes only when a schedule is
+/// due.
+pub fn d02_proto(schedules: usize, run_for: Duration) -> CronResult {
+    use crate::contenders::{Contender, CrossbeamPool};
+    use std::time::Instant;
+    let cron = crate::proto_cron::Cron::parse("* * * * *").expect("every minute");
+    let pool = Arc::new(CrossbeamPool::start(4));
+    let late = Lateness::new();
+    let early = Arc::new(AtomicU64::new(0));
+    let expected = schedules as u64 * (run_for.as_secs() / 60);
+    // Cron times are wall-clock times, so the wheel's ticks are wall-clock
+    // milliseconds, read again at every wake: mapping them once onto the
+    // monotonic clock let the two drift apart, and jobs fired before their
+    // wall-clock minute (seen on WSL2 in the first run). A wall clock that
+    // steps back only delays firing (the wheel never moves back); one that
+    // steps forward fires what is due once, and the next fire time is
+    // computed from now, so missed minutes do not fire in a burst.
+    let unix_ms = || now_ns() / 1_000_000;
+    let c0 = cpu();
+    let stop_at = Instant::now() + run_for;
+    let timer = {
+        let pool = pool.clone();
+        let late = late.clone();
+        let early = early.clone();
+        std::thread::spawn(move || {
+            let mut wheel = crate::proto_wheel::Wheel::new(schedules);
+            wheel.advance(unix_ms(), |_, _, _| {});
+            let first = cron
+                .next_after((unix_ms() / 1000) as i64)
+                .expect("every minute matches");
+            for s in 0..schedules {
+                wheel
+                    .insert(first as u64 * 1000, s as u64)
+                    .expect("capacity is the schedule count");
+            }
+            let mut wakeups = 0u64;
+            let mut due = Vec::new();
+            loop {
+                let now = unix_ms();
+                wheel.advance(now, |_, d, s| due.push((d, s)));
+                for (d, s) in due.drain(..) {
+                    let boundary_ns = d * 1_000_000;
+                    let late = late.clone();
+                    let early = early.clone();
+                    pool.spawn(move || {
+                        let t = now_ns();
+                        if t < boundary_ns {
+                            early.fetch_add(1, Ordering::Relaxed);
+                        }
+                        late.record(t.saturating_sub(boundary_ns));
+                    });
+                    let after = (d.max(now) / 1000) as i64;
+                    let next = cron.next_after(after).expect("every minute matches");
+                    wheel
+                        .insert(next as u64 * 1000, s)
+                        .expect("a fired entry freed its place");
+                }
+                let t = Instant::now();
+                if t >= stop_at {
+                    return wakeups;
+                }
+                let left = stop_at - t;
+                let sleep = match wheel.next_deadline() {
+                    // Wall-clock distance, measured now; a wake before the
+                    // wall-clock time just sleeps again.
+                    Some(d) => Duration::from_millis(d.saturating_sub(unix_ms())).min(left),
+                    None => left,
+                };
+                if !sleep.is_zero() {
+                    std::thread::park_timeout(sleep);
+                }
+                wakeups += 1;
+            }
+        })
+    };
+    let wakeups = timer.join().expect("timer thread");
+    let c1 = cpu();
+    // Let the last boundary's jobs finish before counting.
+    std::thread::sleep(Duration::from_millis(500));
+    if let Ok(p) = Arc::try_unwrap(pool) {
+        p.shutdown();
+    }
+    let mut r = late.finish(expected, cpu_ms(c0, c1));
+    r.wakeups = Some(wakeups);
+    r.early = Some(early.load(Ordering::Relaxed));
+    r
 }
