@@ -124,14 +124,14 @@ static SHIFT_LONG: Shift = Shift::new(LONG as u64);
 static SHIFT_SHORT: Shift = Shift::new(SHORT as u64);
 
 #[inline(always)]
-fn le64(b: &[u8]) -> u64 {
-    u64::from_le_bytes(b.try_into().expect("8 bytes"))
+fn le64(b: &[u8; 8]) -> u64 {
+    u64::from_le_bytes(*b)
 }
 
 pub fn portable_raw(mut crc: u32, data: &[u8]) -> u32 {
     let t = &SLICING;
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
+    let (chunks, rest) = data.as_chunks::<8>();
+    for c in chunks {
         let lo = u32::from_le_bytes([c[0], c[1], c[2], c[3]]) ^ crc;
         let hi = u32::from_le_bytes([c[4], c[5], c[6], c[7]]);
         crc = t[7][(lo & 0xff) as usize]
@@ -143,7 +143,7 @@ pub fn portable_raw(mut crc: u32, data: &[u8]) -> u32 {
             ^ t[1][((hi >> 16) & 0xff) as usize]
             ^ t[0][(hi >> 24) as usize];
     }
-    for &b in chunks.remainder() {
+    for &b in rest {
         crc = (crc >> 8) ^ t[0][((crc ^ b as u32) & 0xff) as usize];
     }
     crc
@@ -161,12 +161,12 @@ mod x86 {
     #[target_feature(enable = "sse4.2")]
     pub fn raw1(crc: u32, data: &[u8]) -> u32 {
         let mut c = crc as u64;
-        let mut chunks = data.chunks_exact(8);
-        for ch in &mut chunks {
+        let (chunks, rest) = data.as_chunks::<8>();
+        for ch in chunks {
             c = _mm_crc32_u64(c, le64(ch));
         }
         let mut crc = c as u32;
-        for &b in chunks.remainder() {
+        for &b in rest {
             crc = _mm_crc32_u8(crc, b);
         }
         crc
@@ -180,9 +180,11 @@ mod x86 {
         let (b, c) = rest.split_at(lane);
         let (mut x, mut y, mut z) = (crc as u64, 0u64, 0u64);
         for ((pa, pb), pc) in a
-            .chunks_exact(8)
-            .zip(b.chunks_exact(8))
-            .zip(c.chunks_exact(8))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(b.as_chunks::<8>().0)
+            .zip(c.as_chunks::<8>().0)
         {
             x = _mm_crc32_u64(x, le64(pa));
             y = _mm_crc32_u64(y, le64(pb));
