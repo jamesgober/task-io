@@ -24,6 +24,8 @@ pub enum Method {
 
 impl Method {
     pub fn all() -> Vec<(Method, &'static str)> {
+        // Pushed to on Windows only.
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut v = vec![
             (Method::ParkTimeout, "park_timeout"),
             (Method::Sleep, "thread::sleep"),
