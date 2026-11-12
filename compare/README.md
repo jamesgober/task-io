@@ -18,7 +18,7 @@ cargo run --release -- all --host R1
 | `--only a,b` | run only these contenders |
 | `--workers 1,4,16,32` | worker counts |
 
-On this Windows machine, link with rust-lld as described in `.claude/CLAUDE.md`. On R2 (WSL Ubuntu), run from a Linux target directory, for example `CARGO_TARGET_DIR=$HOME/target/task-io-compare`.
+On Windows, link with rust-lld. On R2 (WSL Ubuntu), run from a Linux target directory, for example `CARGO_TARGET_DIR=$HOME/target/task-io-compare`.
 
 Results are appended to `results/<date>-<host>.md` (committed) and the raw samples to `results/raw/` (not committed).
 

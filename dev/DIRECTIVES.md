@@ -25,7 +25,7 @@ task-io is the task dispatch pipeline: workers and the controller that sizes and
 - **Bounded everything.** Every lane, delayed set, dedupe index, store, DLQ, and retry loop has a limit, checked before memory is committed. No unbounded growth under any load.
 - **The pool never dies from handler code.** Panics are caught at the handler boundary. A worker thread exits only at shutdown, when the controller retires it, or when a retired stuck worker's handler finally returns.
 - **The controller stays off the hot path.** Workers only write their own health records; the controller reads them. No lock, no shared atomic, and no branch is added to the job path for the controller. Its decisions are rate-limited and bounded by the floor and cap.
-- **Obstructed-path rule** (`LIBRARIES.md` 4.3): no runtime configuration check on a hot path that a compile-time choice or a setup-time choice can replace.
+- **Obstructed-path rule** (library plan 4.3): no runtime configuration check on a hot path that a compile-time choice or a setup-time choice can replace.
 - **Every job is accounted for.** A job is pending, leased, completed, or dead-lettered. Nothing disappears.
 - **Hostile-input hardening.** Payloads, cron expressions, durable records, and cluster messages are untrusted: size limits before allocation, fuzzed parsers and decoders, typed decode errors, no reachable panics, fail closed.
 - **Cross-platform.** Linux, macOS, and Windows are first-class, verified by CI on stable and MSRV 1.85. Platform differences are documented per feature in `docs/PLATFORM-NOTES.md`.
