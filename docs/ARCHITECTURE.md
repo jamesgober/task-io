@@ -215,7 +215,7 @@ The idle mask, the searching count, the health records, and the timer wheel are 
 
 ### 11.2 `sys/`
 
-Each OS call is wrapped in a safe function that checks the return code (a failure becomes `io::Error::last_os_error()`, never a panic), sizes every buffer before the call, and never reads past the length the OS reports or past the buffer, whichever is smaller. Every `// SAFETY:` comment names the documentation listed in section 12. Each wrapper has a test on its OS in CI. A function missing on an older OS version (S-W5, S-M4) is resolved at run time and falls back; it is never assumed.
+Each OS call is wrapped in a safe function that checks the return code (a failure becomes `io::Error::last_os_error()`, never a panic), sizes every buffer before the call, and never reads past the length the OS reports or past the buffer, whichever is smaller. Every `// SAFETY:` comment names the documentation listed in section 12. Each wrapper has a test on its OS in CI. A function missing on an older OS version (S-W5, S-M4) is resolved at run time and falls back; it is never assumed. The same holds for CPU instructions (section 12.4): one is `unsafe` only because the CPU may lack it, so it is reached only after the feature check, and the tests compare its result with the portable version at every length and alignment.
 
 ## 12. The `sys/` surface
 
@@ -254,6 +254,12 @@ Write-through (`FILE_FLAG_WRITE_THROUGH`) for the durable log, if I-18 wants it,
 | S-M4 | park on a word *(pending I-04, I-34)* | `os_sync_wait_on_address`, `os_sync_wake_by_address_any` (macOS 14.4 and later), looked up with `dlsym(RTLD_DEFAULT, ..)` at start; when missing, `std::thread::park` | `os/os_sync_wait_on_address.h` |
 
 Flushing needs no FFI on any OS (section 8.2).
+
+### 12.4 CPU instructions (`core::arch`, any OS)
+
+| Id | Need | Instruction | Reference |
+|---|---|---|---|
+| S-C1 | CRC-32C of every durable record (section 8.2, I-28) | x86-64: `_mm_crc32_u64` and `_mm_crc32_u8` (SSE 4.2), three streams joined by table shifts from 384 bytes, one stream below that; AArch64: `__crc32cd` and `__crc32cb` (feature `crc`). Reached only after `is_x86_feature_detected!("sse4.2")` or `is_aarch64_feature_detected!("crc")` (std caches the answer), or under a compile-time `target_feature`; otherwise slicing-by-8, which is safe code. I-28 quick run: 2.6 ns per 64-byte checksum against 6.4 ns for crc-fast 1.10.0. Large payloads by carry-less-multiply folding are pending I-45 | Intel 64 and IA-32 Architectures Software Developer's Manual, Vol. 2, "CRC32"; Arm Architecture Reference Manual for A-profile, "CRC32CX" |
 
 ## 13. Seam contracts
 
