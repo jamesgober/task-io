@@ -158,6 +158,8 @@ Every implementation, task-io's own and every adapter's, must also hold to these
 
   Types: `Put`, `Lease`, `Complete`, `Retry`, `DeadLetter`, `Expire`, `Checkpoint`.
 - **Group commit:** submits append to an in-memory buffer; the flusher writes the buffer and calls `File::sync_data`, which is `fdatasync` on Linux, `fcntl(F_FULLFSYNC)` on macOS (where `fsync` alone does not reach stable storage), and `FlushFileBuffers` on Windows (read in the std source for 1.95; to re-check against 1.85 at the lock), then acknowledges every submit in that batch. The batch window adapts: a lone submit is flushed at once; under load, batches grow.
+- **Preallocated segments:** the next segment is written full of zeros and synced before it is needed, so a flush overwrites allocated blocks and never changes the file's size; a zero length ends the scan. In the I-18 quick runs a growing file lost to SQLite at 1 submitter on Windows and the preallocated segment did not.
+- **Flush method** *(pending I-46)*: `sync_data` after each batch, or a segment opened write-through (`FILE_FLAG_WRITE_THROUGH` on Windows, `O_DSYNC` on Linux) with no separate flush. Write-through was about 9x faster on Windows NVMe and 1.3x to 1.9x slower under WSL in the quick runs, so the choice is configurable and, by default, measured per device when a segment opens.
 - **Recovery:** read segments from the last checkpoint; a record whose length runs past the end of the file, or whose CRC does not match, ends recovery for that segment (a torn tail from a crash) and is truncated; a bad record in the middle of a segment is reported, its job goes to the DLQ, and recovery continues with the next valid record.
 - **Compaction:** a checkpoint record lists live jobs; segments wholly before the last checkpoint are deleted.
 - **Encryption:** with a `Sealer`, the payload and fields are sealed before the CRC is computed over the sealed bytes, so corruption is caught before decryption.
@@ -232,7 +234,7 @@ Planned FFI declarations per OS, with the documentation each relies on. A pendin
 | S-W5 | sub-millisecond timer for due jobs (I-33: wake p50 323 µs against 13 ms for `park_timeout`; D-01 lateness p50 about 0.4 ms against 7.5 ms or more) | `CreateWaitableTimerExW` with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`, `SetWaitableTimer` (a negative due time is relative, in 100 ns units), `WaitForMultipleObjects` with a wake event for an earlier deadline, `CloseHandle`. The flag exists from Windows 10 1803; if creation fails, a normal waitable timer is used | Microsoft Learn, "CreateWaitableTimerExW" |
 | S-W6 | isolated children die with the parent (no orphans) | `CreateJobObjectW`, `SetInformationJobObject(JobObjectExtendedLimitInformation)` with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, `AssignProcessToJobObject` on the `Child`'s raw handle | Microsoft Learn, "JOBOBJECT_EXTENDED_LIMIT_INFORMATION" |
 
-Write-through (`FILE_FLAG_WRITE_THROUGH`) for the durable log, if I-18 wants it, is `OpenOptionsExt::custom_flags`: safe, no FFI.
+Write-through (`FILE_FLAG_WRITE_THROUGH`, 0x80000000) for the durable log (section 8.2, pending I-46) is `OpenOptionsExt::custom_flags`: safe, no FFI.
 
 ### 12.2 Linux (`libc`, which `std` already links)
 
@@ -243,6 +245,8 @@ Write-through (`FILE_FLAG_WRITE_THROUGH`) for the durable log, if I-18 wants it,
 | S-L3 | per-thread CPU time | `pthread_getcpuclockid(pthread_t, &mut clockid)`, then `clock_gettime(clockid, &mut ts)`, with the `pthread_t` from the worker's `JoinHandle`; valid because the pool holds the handle until it joins the thread | `pthread_getcpuclockid(3)`, `clock_gettime(2)` |
 | S-L4 | park on a word *(pending I-04, I-34)* | `syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, null, null, 0)` and `FUTEX_WAKE_PRIVATE`; `SYS_futex` is 202 on x86_64 and 98 on aarch64 and riscv64. `std::thread::park` is already futex-based on Linux, so this is added only for a measured gain | `futex(2)` |
 | S-L5 | isolated children die with the parent | the child calls `prctl(PR_SET_PDEATHSIG, SIGKILL)` at start, then compares `getppid()` with the parent id it was given and exits if they differ (the parent may have died before the call) | `prctl(2)`, `getppid(2)` |
+
+`O_DSYNC` for a write-through segment (section 8.2, pending I-46) is `OpenOptionsExt::custom_flags` with 0o10000 (`asm-generic/fcntl.h`, which x86_64 and aarch64 use; a few other architectures define it differently, so the constant is per target): safe, no FFI.
 
 ### 12.3 macOS (`libSystem`)
 
