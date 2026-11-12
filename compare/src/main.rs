@@ -21,7 +21,9 @@ mod proto_intake;
 // Experiment I-07: the `proto-wheel` D-01 contender.
 mod proto_wheel;
 mod report;
+// Experiment I-33: sleep lateness by primitive.
 mod retries;
+mod sleep_probe;
 mod stats;
 mod stress;
 mod survey;
@@ -117,6 +119,7 @@ fn main() {
             "W-13" => w13(&o, &mut report),
             "D-01" => d01(&o, &mut report),
             "I-07" => i07(&o, &mut report),
+            "I-33" => i33(&o, &mut report),
             "D-02" => d02(&o, &mut report),
             "I-17" => i17(&o, &mut report),
             "P-01" => p01(&o, &mut report),
@@ -855,6 +858,20 @@ fn i07(o: &Opts, r: &mut Report) {
     rows(r, "binary-heap", res);
 }
 
+/// Experiment I-33 (dev/RESEARCH.md): how late a timed sleep wakes, by
+/// primitive, with nothing else running in the harness. Not a gated suite.
+fn i33(o: &Opts, r: &mut Report) {
+    let n = if o.quick { 500 } else { 5_000 };
+    let (min, max) = (Duration::from_micros(50), Duration::from_millis(5));
+    let v = format!("{n} sleeps of 50 us to 5 ms");
+    for (m, name) in sleep_probe::Method::all() {
+        let h = sleep_probe::lateness(m, n, min, max);
+        let mut row = Row::latency("I-33", v.clone(), name, 1, &[h]).info();
+        row.metric = "wake lateness".into();
+        r.push(row);
+    }
+}
+
 fn d01(o: &Opts, r: &mut Report) {
     let (n, window, runs) = if o.quick {
         (100_000, Duration::from_secs(2), 1)
@@ -954,9 +971,15 @@ fn d01(o: &Opts, r: &mut Report) {
     }
     if o.wants("proto-wheel-intake") {
         let res: Vec<_> = (0..runs)
-            .map(|_| delayed::d01_wheel_intake(w, n, window))
+            .map(|_| delayed::d01_wheel_intake(w, n, window, false))
             .collect();
         rows(r, "proto-wheel-intake", res);
+    }
+    if cfg!(windows) && o.wants("proto-wheel-intake-hrt") {
+        let res: Vec<_> = (0..runs)
+            .map(|_| delayed::d01_wheel_intake(w, n, window, true))
+            .collect();
+        rows(r, "proto-wheel-intake-hrt", res);
     }
     if o.wants("proto-wheel-handle") {
         let res: Vec<_> = (0..runs)

@@ -325,12 +325,53 @@ pub fn d01_wheel(workers: usize, n: usize, window: Duration) -> DelayResult {
 // proto-wheel-intake (experiment I-43)
 // ---------------------------------------------------------------------------
 
+/// How a timer thread sleeps: `park` and `park_timeout`, or (I-33, Windows
+/// only) a high-resolution waitable timer with a wake event; `park_timeout`
+/// waits in whole timer periods on Windows (about 15.6 ms by default).
+enum Sleeper {
+    Park,
+    #[cfg(windows)]
+    HiRes(Arc<crate::sleep_probe::Wakeable>),
+}
+
+impl Sleeper {
+    fn new(hires: bool) -> Self {
+        #[cfg(windows)]
+        if hires && let Some(w) = crate::sleep_probe::Wakeable::new() {
+            return Sleeper::HiRes(Arc::new(w));
+        }
+        let _ = hires;
+        Sleeper::Park
+    }
+
+    /// Hands the intake its way to wake this thread.
+    fn register(&self, intake: &crate::proto_intake::Intake) {
+        match self {
+            Sleeper::Park => intake.set_timer(std::thread::current()),
+            #[cfg(windows)]
+            Sleeper::HiRes(w) => {
+                let w = w.clone();
+                intake.set_waker(Box::new(move || w.wake()));
+            }
+        }
+    }
+
+    fn sleep(&self, d: Option<Duration>) {
+        match (self, d) {
+            (Sleeper::Park, None) => std::thread::park(),
+            (Sleeper::Park, Some(d)) => std::thread::park_timeout(d),
+            #[cfg(windows)]
+            (Sleeper::HiRes(w), d) => w.wait(d),
+        }
+    }
+}
+
 /// `proto-wheel-intake`: the timer thread owns the wheel with no lock;
 /// submits go through `proto_intake::Intake` (per-submitter rings, a wake only
 /// for an earlier deadline or a half ring of pushes). Cancel is the heap
 /// scheduler's flag, checked when the timer fires, so this row differs from
 /// heap-scheduler in submit only (I-44 is the cancel experiment).
-pub fn d01_wheel_intake(workers: usize, n: usize, window: Duration) -> DelayResult {
+pub fn d01_wheel_intake(workers: usize, n: usize, window: Duration, hires: bool) -> DelayResult {
     use crate::proto_intake::Intake;
     let pool = Arc::new(CrossbeamPool::start(workers));
     let out = Outcome::new(n);
@@ -345,7 +386,8 @@ pub fn d01_wheel_intake(workers: usize, n: usize, window: Duration) -> DelayResu
     let sched = {
         let pool = pool.clone();
         std::thread::spawn(move || {
-            intake.set_timer(std::thread::current());
+            let sleeper = Sleeper::new(hires);
+            sleeper.register(intake);
             let _ = ready_tx.send(());
             let mut wheel = crate::proto_wheel::Wheel::new(n);
             loop {
@@ -370,12 +412,12 @@ pub fn d01_wheel_intake(workers: usize, n: usize, window: Duration) -> DelayResu
                     continue; // a submit slipped in
                 }
                 match next {
-                    None => std::thread::park(),
+                    None => sleeper.sleep(None),
                     Some(d) => {
                         let target = t0 + Duration::from_micros(d);
                         let now = Instant::now();
                         if target > now {
-                            std::thread::park_timeout(target - now);
+                            sleeper.sleep(Some(target - now));
                         }
                     }
                 }
@@ -396,7 +438,7 @@ pub fn d01_wheel_intake(workers: usize, n: usize, window: Duration) -> DelayResu
     let expected = (n - n.div_ceil(2)) as u64;
     wait_fired(out, expected, window + Duration::from_secs(30));
     stop.store(true, Ordering::Relaxed);
-    sched.thread().unpark();
+    intake.wake_timer();
     let _ = sched.join();
     if let Ok(p) = Arc::try_unwrap(pool) {
         p.shutdown();
@@ -492,7 +534,7 @@ pub fn d01_wheel_handle(workers: usize, n: usize, window: Duration) -> DelayResu
     let expected = (n - n.div_ceil(2)) as u64;
     wait_fired(out, expected, window + Duration::from_secs(30));
     stop.store(true, Ordering::Relaxed);
-    sched.thread().unpark();
+    intake.wake_timer();
     let _ = sched.join();
     if let Ok(p) = Arc::try_unwrap(pool) {
         p.shutdown();

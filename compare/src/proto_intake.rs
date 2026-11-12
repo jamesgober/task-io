@@ -139,7 +139,9 @@ pub struct Intake {
     next_home: AtomicUsize,
     /// The deadline the timer sleeps toward (`u64::MAX`: none).
     sleeping_until: Padded<AtomicU64>,
-    timer: OnceLock<Thread>,
+    /// How to wake the timer thread: `unpark`, or another primitive it
+    /// sleeps on (the high-resolution timer of I-33 on Windows).
+    waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl Intake {
@@ -150,19 +152,29 @@ impl Intake {
             id: NEXT_INTAKE.fetch_add(1, Ordering::Relaxed),
             next_home: AtomicUsize::new(0),
             sleeping_until: Padded(AtomicU64::new(u64::MAX)),
-            timer: OnceLock::new(),
+            waker: OnceLock::new(),
         }
     }
 
     /// Called once by the timer thread before it first parks.
     pub fn set_timer(&self, t: Thread) {
-        let _ = self.timer.set(t);
+        self.set_waker(Box::new(move || t.unpark()));
+    }
+
+    /// As `set_timer`, for a timer thread that sleeps on something else.
+    pub fn set_waker(&self, w: Box<dyn Fn() + Send + Sync>) {
+        let _ = self.waker.set(w);
     }
 
     fn wake(&self) {
-        if let Some(t) = self.timer.get() {
-            t.unpark();
+        if let Some(w) = self.waker.get() {
+            w();
         }
+    }
+
+    /// Wakes the timer thread however it sleeps (used at shutdown).
+    pub fn wake_timer(&self) {
+        self.wake();
     }
 
     fn home(&self) -> usize {
