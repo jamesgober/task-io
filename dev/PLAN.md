@@ -59,10 +59,10 @@ It is built for enterprise, distributed, very long-running pipelines under heavy
 
 | Consumer | What it needs from task-io | Where it is written |
 |---|---|---|
-| Web stack (`serve-net`, `web-net`, `gate-net`) | background jobs: emails, cleanup, session-expiry sweeps; a local job queue and cron first, distribution later | `_strategy/WEB-STACK-DELIVERABLES.md` section 7 |
+| Web stack (`serve-net`, `web-net`, `gate-net`) | background jobs: emails, cleanup, session-expiry sweeps; a local job queue and cron first, distribution later | the web stack plan, section 7 |
 | `smtp-net` | queuing, retries with backoff, and dead letters for outgoing mail; smtp-net classifies a failure as temporary or permanent, and task-io acts on it | `net-collection/smtp-net/dev/PLAN.md` |
-| distributed services | the replacement for a RabbitMQ-style task queue (`LIBRARIES.md` section 6 lists task-io as the in-ecosystem choice instead of "lapin + custom") | `_strategy/LIBRARIES.md` |
-| `spawn-io` (planned) | a store it can use as a durable mission ledger; retries and dead letters for missions | `_strategy/SPAWN-IO.md` section 5 |
+| distributed services | the replacement for a RabbitMQ-style task queue (the library plan lists task-io as the in-ecosystem choice instead of "lapin + custom") | the library plan |
+| `spawn-io` (planned) | a store it can use as a durable mission ledger; retries and dead letters for missions | the spawn-io design, section 5 |
 | `service-kernel` | recurring and background work for services without each one running its own threads | `service-kernel/src/worker` |
 
 ### 2.2 The pipeline
@@ -117,8 +117,8 @@ Every arrow is bounded. Every state change of a job goes through the store, so a
 
 | Not here | Where it lives | Why |
 |---|---|---|
-| A general async executor (spawning futures, work stealing of tasks, fork-join, async scopes, wakers) | the executor crate (candidate `cycle-exec`, O-1); design saved in `_strategy/EXECUTOR-SEED/` | different purpose (`LIBRARIES.md` 3.2) |
-| Spawns: spawner, missions, mission ledger, replacement, elastic replication of missions | `spawn-io` (planned) | James's own design (`_strategy/SPAWN-IO.md`) |
+| A general async executor (spawning futures, work stealing of tasks, fork-join, async scopes, wakers) | the executor crate (candidate `cycle-exec`, O-1); design kept for it | different purpose (library plan 3.2) |
+| Spawns: spawner, missions, mission ledger, replacement, elastic replication of missions | `spawn-io` (planned) | James's own design |
 | Actors, mailboxes, supervision trees | `actor-io` (planned, if needed) | a programming model, not dispatch |
 | Encryption algorithms | `crypt-io`, through an adapter crate implementing `Sealer` | no home-made cryptography; no dependency in task-io |
 | TLS, consensus, RPC framing | `tls-net`, `raft-io`, `rpc-io`, through an adapter crate implementing `Transport` and `Membership` | same |
@@ -485,7 +485,7 @@ Each adapter passes the trait's conformance suite, which task-io publishes as a 
 
 ### 9.4 Names
 
-`task-forge` was planned as the in-process scheduler (`LIBRARIES.md` 3.2). It was never built, and the name is taken on crates.io by another author (`task_forge`; crates.io treats `-` and `_` as the same). That role is now the executor crate (O-1).
+`task-forge` was planned as the in-process scheduler (the library plan 3.2). It was never built, and the name is taken on crates.io by another author (`task_forge`; crates.io treats `-` and `_` as the same). That role is now the executor crate (O-1).
 
 ---
 
@@ -532,7 +532,7 @@ These are James's calls. Each is written so it can be answered with one line.
 
 | Id | Question | Recommendation |
 |---|---|---|
-| O-1 | The general-purpose executor moved out of task-io: name it, and when to start it? The design is saved in `_strategy/EXECUTOR-SEED/`. | `cycle-exec`, as `CYCLE_STRATEGY.md` already plans; start when Hive DB's executor or LexerSketch needs it |
+| O-1 | The general-purpose executor moved out of task-io: name it, and when to start it? The design is kept for it. | `cycle-exec`, as already planned; start when a database's executor or LexerSketch needs it |
 | O-2 | Publish `0.1.0` to crates.io now to claim the `task-io` name? | yes; the name is free today and the scaffold builds clean |
 | O-3 | ~~REPS "MUST use tokio"~~ Answered 2026-10-14: the rule does not apply to task-io (D-016). | |
 | O-4 | If, after every experiment, one gated benchmark cannot reach the 1.20 factor, the release stays blocked. Confirm that only you can waive a single benchmark, in writing in section 14. | yes, keep the block |
@@ -556,8 +556,8 @@ The idea register, with hypothesis, method, cost, and status for each, lives in 
 
 | Id | Date | Decision | Reason |
 |---|---|---|---|
-| D-001 | 2026-10-13 | Template aligned with net-io: edition 2024, MSRV 1.85, `Apache-2.0 OR MIT`, canonical `REPS.md`, `dev/` committed and `.dev/` private, no committed lockfile | portfolio consistency; the May scaffold (edition 2021, MSRV 1.75, Apache only, a stub REPS) was never published |
-| D-002 | 2026-10-13 | Scope is the task dispatch pipeline: workers, lanes, delays, cron, retries, DLQ, idempotency, leases, stores, then dispatch across nodes. Local first, distributed second | the original purpose (`LIBRARIES.md`: "distributed task dispatch", replacing "lapin + custom"); the web stack needs a local job queue and cron first (`WEB-STACK-DELIVERABLES.md` 7); distribution needs a correct local pipeline under it |
+| D-001 | 2026-10-13 | Template aligned with net-io: edition 2024, MSRV 1.85, `Apache-2.0 OR MIT`, canonical `REPS.md`, `dev/` committed, no committed lockfile | portfolio consistency; the May scaffold (edition 2021, MSRV 1.75, Apache only, a stub REPS) was never published |
+| D-002 | 2026-10-13 | Scope is the task dispatch pipeline: workers, lanes, delays, cron, retries, DLQ, idempotency, leases, stores, then dispatch across nodes. Local first, distributed second | the original purpose (the library plan: "distributed task dispatch", replacing "lapin + custom"); the web stack needs a local job queue and cron first (the web stack plan, 7); distribution needs a correct local pipeline under it |
 | D-003 | 2026-10-13 | No tokio and no runtime dependency; workers are task-io's own threads | ours, not rented; a pipeline cannot beat the competitors by depending on them |
 | D-004 | 2026-10-13 | Handlers are plain functions running on worker threads; async handlers go through an `Executor` seam, never a bundled executor | single purpose; any handler can do blocking work safely |
 | D-005 | 2026-10-13 | Every job state change goes through the `Store` trait; the memory store is the default | one code path for memory and durable stores; crash guarantees come from the store |
@@ -570,9 +570,9 @@ The idea register, with hypothesis, method, cost, and status for each, lives in 
 | D-012 | 2026-10-13 | API simplicity mandate in section 4.3 | James's mandate |
 | D-013 | 2026-10-13 | Testing mandate in sections 4.4 and 11 | James's mandate: nothing untested, edge cases included |
 | D-014 | 2026-10-13 | `0.2.0` is an R&D phase with a written program (RESEARCH.md) and an innovation requirement: at least three capabilities no benchmarked competitor has, each proven by experiment | James asked for invention, not a copy of existing designs |
-| D-015 | 2026-10-13 | task-io is single-purpose. The first draft of this plan (commit 68bbce3) widened it into a full runtime with an executor, actors, and a slot for James's spawn model; that is reverted. The executor design moves to a separate crate (O-1) and is saved in `_strategy/EXECUTOR-SEED/`; actors move to `actor-io`; spawns move to `spawn-io` (`_strategy/SPAWN-IO.md`) | James: the libraries are meant to be single-purpose; `LIBRARIES.md` 3.2 separates in-process scheduling from dispatch; a smaller task-io ships sooner, and the web stack needs it soon |
+| D-015 | 2026-10-13 | task-io is single-purpose. The first draft of this plan (commit 68bbce3) widened it into a full runtime with an executor, actors, and a slot for James's spawn model; that is reverted. The executor design moves to a separate crate (O-1) and its design is kept; actors move to `actor-io`; spawns move to `spawn-io` | James: the libraries are meant to be single-purpose; the library plan (3.2) separates in-process scheduling from dispatch; a smaller task-io ships sooner, and the web stack needs it soon |
 | D-016 | 2026-10-14 | REPS's tokio rules ("MUST use tokio", `spawn_blocking`, `tokio::sync::Semaphore`) do not apply to task-io. Their intent is kept with task-io's own means: bounded concurrency (lanes, quotas, the worker cap), never blocking a shared executor (handlers run on task-io's threads), cancellation (deadlines, leases, shutdown) | James (REPS's author) says the tokio rule was added without his approval and is not his policy; task-io needs no async runtime anywhere in its design, so this is only a REPS wording issue, not a design conflict |
-| D-017 | 2026-10-14 | Zero runtime dependencies in every feature combination, permanently, first-party crates included. Every integration is a trait in task-io implemented by an adapter crate that depends on task-io. CI checks the dependency tree is empty | the portfolio's dependency disposition (`LIBRARIES.md` 4.2) and the io crates' shared identity; the earlier draft listed store-io, crypt-io, raft-io, rpc-io, and tls-net as dependencies, which also pulled third-party crates in through crypt-io and rpc-io |
+| D-017 | 2026-10-14 | Zero runtime dependencies in every feature combination, permanently, first-party crates included. Every integration is a trait in task-io implemented by an adapter crate that depends on task-io. CI checks the dependency tree is empty | the portfolio's dependency disposition (the library plan 4.2) and the io crates' shared identity; the earlier draft listed store-io, crypt-io, raft-io, rpc-io, and tls-net as dependencies, which also pulled third-party crates in through crypt-io and rpc-io |
 | D-018 | 2026-10-14 | task-io ships its own durable log store (append-only, checksummed, group commit, crash recovery); store-io becomes an optional adapter | durability is task-io's core promise and must not wait on another crate or add a dependency (D-017) |
 | D-019 | 2026-10-14 | The controller is a core part of task-io from 0.3.0: health records, load signals, scaling between a floor and a cap with configurable thresholds, repair of stuck, slow, failing, and dead workers, on by default | James: the pool must monitor every worker and the pipeline load, spawn and retire workers, and repair failing ones, for enterprise, distributed, long-running pipelines under heavy load |
 | D-020 | 2026-10-14 | Handlers that must be killable run as isolated workers in child processes | a Rust thread cannot be killed safely; process isolation is the only true kill, and it keeps a crashing handler from taking the process down |

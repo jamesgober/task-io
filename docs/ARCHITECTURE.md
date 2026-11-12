@@ -56,7 +56,7 @@ Every step is bounded. A token mismatch at `complete`, `retry`, or `dead_letter`
 - A job lives in a fixed **slot**: a 16-byte header (id, attempt, lane, flags) and 64 bytes of inline payload; larger payloads are stored out of line and the slot holds a pointer. 80 bytes in all *(pending I-36)*.
 - Each lane is a bounded ring of slot indexes (a Vyukov MPMC ring), cache-line padded head and tail *(pending I-01, I-03)*.
 - Submitters do not all write one ring tail: the lane's slots are split into per-submitter rings that workers drain in place, so no job waits on a flush. The quick `proto-shards` pass ran 32 submitters 6.1x faster than crossbeam-pool; the shard count and the ordering cost are still to be measured *(pending I-35, RESEARCH section 6)*.
-- With one lane (the default), workers read it directly: no DRR state, no branch on the hot path (`LIBRARIES.md` 4.3). With several, DRR picks the next lane by weight and deficit; aging lifts a job that waited past its bound.
+- With one lane (the default), workers read it directly: no DRR state, no branch on the hot path (the library plan 4.3). With several, DRR picks the next lane by weight and deficit; aging lifts a job that waited past its bound.
 
 ## 4. Workers and parking
 

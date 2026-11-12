@@ -140,11 +140,11 @@ Columns: id, workload (exact), primary metric, statistics gated, competitors.
 
 ### 4.7 Cluster (0.6.0)
 
-Workloads are finalized in the `0.6.0` design and added here before that phase starts. Planned: remote dispatch latency and throughput, failover time after node loss, recovery after a partition heals, and 0 stale commits under the Jepsen-style suite. Planned competitors, run locally at the same durability and with authentication on: RabbitMQ through `lapin` (the stack it replaces, `LIBRARIES.md` section 6), NATS JetStream, and Redis Streams. Temporal and Sidekiq numbers are context only.
+Workloads are finalized in the `0.6.0` design and added here before that phase starts. Planned: remote dispatch latency and throughput, failover time after node loss, recovery after a partition heals, and 0 stale commits under the Jepsen-style suite. Planned competitors, run locally at the same durability and with authentication on: RabbitMQ through `lapin` (the stack it replaces, the library plan section 6), NATS JetStream, and Redis Streams. Temporal and Sidekiq numbers are context only.
 
 ### 4.8 Moved out
 
-The executor suites (task spawn, wake, fork-join, timers for async tasks, channels) and the actor suite moved with the executor and actor designs to `_strategy/EXECUTOR-SEED/` (PLAN D-015).
+The executor suites (task spawn, wake, fork-join, timers for async tasks, channels) and the actor suite moved out with the executor and actor designs (PLAN D-015).
 
 ---
 

@@ -26,7 +26,7 @@ Exit: competitor baselines measured and committed, so every target in BENCHMARKS
 - [ ] Baselines measured on R1 and R2; `compare/results/<date>-R1.md` and `-R2.md` committed; BENCHMARKS section 5 filled with the best competitor and the 1.20 target per row.
 
 **Step 2: reading**
-- [ ] Every source in RESEARCH section 5 read; one note per area in `.dev/research/`.
+- [ ] Every source in RESEARCH section 5 read; one note per area.
 
 **Step 3: experiments**
 - [ ] I-01 to I-28: prototype, measure, profile, verdict, evidence (RESEARCH section 3). Controller experiments (I-21, I-23, I-24, I-26, I-27) run in simulation first, then on R1 and R2.
@@ -105,7 +105,7 @@ Exit: no open finding.
 - [ ] Fuzz targets for every parser and decoder (cron, payload codec, durable records, isolated-worker frames, cluster messages), run for at least 24 hours each.
 - [ ] The 7-day soak (BENCHMARKS S-02) on R2: zero drift, 0 repairs caused by task-io itself.
 - [ ] Chaos run: random panics, stuck handlers, slow workers, killed children, allocator failures, clock jumps, store crashes, full disks, network faults.
-- [ ] Adversarial review; every finding fixed test-first; `.dev/AUDIT-0.9.0.md`.
+- [ ] Adversarial review; every finding fixed test-first.
 - [ ] `docs/ARCHITECTURE.md`, `docs/PERFORMANCE.md`, `docs/PLATFORM-NOTES.md`, `docs/STABILITY-1.0.md` complete.
 - [ ] `cargo-semver-checks` in CI.
 
