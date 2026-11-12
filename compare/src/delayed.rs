@@ -543,3 +543,142 @@ pub fn d01_wheel_handle(workers: usize, n: usize, window: Duration) -> DelayResu
     r.ns_per_drop = Some(dropped.as_nanos() as f64 / n as f64);
     r
 }
+
+// ---------------------------------------------------------------------------
+// I-43 submit scaling
+// ---------------------------------------------------------------------------
+
+/// Experiment I-43, the submit path alone: one thread submits `n` delayed
+/// jobs to an intake with room for all of them and no timer thread, with
+/// and without the SeqCst fence of the wake protocol. Returns ns per submit
+/// (fenced, unfenced).
+pub fn submit_fence_cost(n: usize) -> (f64, f64) {
+    use crate::proto_intake::Intake;
+    let run = |fenced: bool| {
+        let q = Intake::new(16, n.div_ceil(16));
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let t = Instant::now();
+        for k in 0..n {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let d = 3_600_000_000 + x % 10_000_000;
+            if fenced {
+                q.submit(d, k as u64);
+            } else {
+                q.submit_without_fence(d, k as u64);
+            }
+        }
+        t.elapsed().as_nanos() as f64 / n as f64
+    };
+    (run(true), run(false))
+}
+
+/// Experiment I-43, many submitters: `submitters` threads each submit their
+/// share of `n` delayed jobs due an hour out (so nothing fires and only the
+/// submit path is measured; deadlines spread over 10 s, in a different
+/// order per submitter), to heap-scheduler's structure (one mutex and a
+/// condvar, notified when a deadline is the new earliest) or to the intake.
+/// `intake` is `Some(entries per ring)` (16 rings) or `None` for the heap.
+/// A timer thread runs in both, waiting as it would. Returns ns per submit
+/// over the whole batch (wall time / n).
+pub fn submit_scaling(intake: Option<usize>, submitters: usize, n: usize) -> f64 {
+    use crate::proto_intake::Intake;
+    let per = n / submitters;
+    let far = 3_600_000_000u64; // µs
+    let go = Arc::new(std::sync::Barrier::new(submitters + 1));
+    let stop = Arc::new(AtomicBool::new(false));
+    let elapsed;
+    if let Some(per_ring) = intake {
+        let q: &'static Intake = Box::leak(Box::new(Intake::new(16, per_ring)));
+        let timer = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                q.set_timer(std::thread::current());
+                let mut wheel = crate::proto_wheel::Wheel::new(n);
+                while !stop.load(Ordering::Relaxed) {
+                    q.drain(|d, p| {
+                        wheel.insert(d, p).expect("capacity is n");
+                    });
+                    let next = wheel.next_deadline();
+                    if q.sleep_toward(next) {
+                        std::thread::park_timeout(Duration::from_millis(100));
+                    }
+                }
+            })
+        };
+        let hs: Vec<_> = (0..submitters)
+            .map(|s| {
+                let go = go.clone();
+                std::thread::spawn(move || {
+                    go.wait();
+                    let mut x = 0x2545_F491_4F6C_DD1Du64 ^ s as u64;
+                    for k in 0..per {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        q.submit(far + x % 10_000_000, k as u64);
+                    }
+                })
+            })
+            .collect();
+        go.wait();
+        let t = Instant::now();
+        for h in hs {
+            h.join().unwrap();
+        }
+        elapsed = t.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        q.wake_timer();
+        let _ = timer.join();
+    } else {
+        let heap: &'static Heap = Box::leak(Box::new(Heap {
+            q: Mutex::new(BinaryHeap::with_capacity(n)),
+            cv: Condvar::new(),
+            stop: AtomicBool::new(false),
+        }));
+        let timer = std::thread::spawn(move || {
+            let mut q = heap.q.lock().expect("heap");
+            while !heap.stop.load(Ordering::Relaxed) {
+                q = heap
+                    .cv
+                    .wait_timeout(q, Duration::from_millis(100))
+                    .expect("heap")
+                    .0;
+            }
+        });
+        let base = Instant::now();
+        let hs: Vec<_> = (0..submitters)
+            .map(|s| {
+                let go = go.clone();
+                std::thread::spawn(move || {
+                    go.wait();
+                    let mut x = 0x2545_F491_4F6C_DD1Du64 ^ s as u64;
+                    for k in 0..per {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        let due = base + Duration::from_micros(far + x % 10_000_000);
+                        let mut q = heap.q.lock().expect("heap");
+                        let earliest = q.peek().is_none_or(|Reverse((e, _))| due < *e);
+                        q.push(Reverse((due, k)));
+                        drop(q);
+                        if earliest {
+                            heap.cv.notify_one();
+                        }
+                    }
+                })
+            })
+            .collect();
+        go.wait();
+        let t = Instant::now();
+        for h in hs {
+            h.join().unwrap();
+        }
+        elapsed = t.elapsed();
+        heap.stop.store(true, Ordering::Relaxed);
+        heap.cv.notify_all();
+        let _ = timer.join();
+    }
+    elapsed.as_nanos() as f64 / (per * submitters) as f64
+}

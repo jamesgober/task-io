@@ -120,6 +120,7 @@ fn main() {
             "D-01" => d01(&o, &mut report),
             "I-07" => i07(&o, &mut report),
             "I-33" => i33(&o, &mut report),
+            "I-43" => i43(&o, &mut report),
             "D-02" => d02(&o, &mut report),
             "I-17" => i17(&o, &mut report),
             "P-01" => p01(&o, &mut report),
@@ -869,6 +870,77 @@ fn i33(o: &Opts, r: &mut Report) {
         let mut row = Row::latency("I-33", v.clone(), name, 1, &[h]).info();
         row.metric = "wake lateness".into();
         r.push(row);
+    }
+}
+
+/// Experiment I-43 (dev/RESEARCH.md), many submitters: delayed submits to
+/// heap-scheduler's locked heap and to the intake, nothing firing. Not a
+/// gated suite.
+fn i43(o: &Opts, r: &mut Report) {
+    let (n, runs) = if o.quick {
+        (200_000, 1)
+    } else {
+        (1_000_000, 3)
+    };
+    if o.wants("proto-wheel-intake") {
+        let v = format!("{n} delayed submits, 1 thread, no timer thread");
+        let res: Vec<(f64, f64)> = (0..runs.max(5))
+            .map(|_| delayed::submit_fence_cost(n))
+            .collect();
+        for (metric, xs) in [
+            (
+                "time per submit, with the fence",
+                res.iter().map(|r| r.0).collect::<Vec<_>>(),
+            ),
+            (
+                "time per submit, without the fence (unsound)",
+                res.iter().map(|r| r.1).collect(),
+            ),
+        ] {
+            r.push(
+                Row::summary(
+                    "I-43",
+                    v.clone(),
+                    "proto-wheel-intake",
+                    1,
+                    metric,
+                    "ns",
+                    false,
+                    &xs,
+                )
+                .info(),
+            );
+        }
+    }
+    for subs in [1usize, 4, 16, 32] {
+        let v = format!("{n} delayed submits from {subs} submitters, none due");
+        for (name, intake) in [
+            ("heap-scheduler", None),
+            ("proto-wheel-intake", Some(4096)),
+            // Room for the whole batch: no backpressure, so the timer
+            // thread's drain rate is out of the measurement.
+            ("proto-wheel-intake-64k", Some(65_536)),
+        ] {
+            if !o.wants(name) {
+                continue;
+            }
+            let xs: Vec<f64> = (0..runs)
+                .map(|_| delayed::submit_scaling(intake, subs, n))
+                .collect();
+            r.push(
+                Row::summary(
+                    "I-43",
+                    v.clone(),
+                    name,
+                    subs,
+                    "time per submit",
+                    "ns",
+                    false,
+                    &xs,
+                )
+                .info(),
+            );
+        }
     }
 }
 
