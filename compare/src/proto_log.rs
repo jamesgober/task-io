@@ -31,6 +31,11 @@
 //! one write instead of flushing its whole cache. Whether a given device
 //! honours that is what a power-loss test checks; this prototype measures
 //! only the cost.
+//!
+//! `auto` (experiment I-46) picks between the two when the segment opens:
+//! it times `PROBES` flushes of one zero block with each method, rewriting
+//! the segment's last block (zeros, which recovery reads as the end of the
+//! log), and keeps the faster by median. The probe's time is reported.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -53,6 +58,64 @@ pub struct Options {
     pub prealloc: Option<u64>,
     pub checksum: bool,
     pub write_through: bool,
+    pub auto: bool,
+}
+
+const PROBES: usize = 8;
+const PROBE_BLOCK: usize = 4096;
+
+/// What `auto` measured: median ns per flush of one block by each method,
+/// and the whole probe's time.
+#[derive(Clone, Copy, Debug)]
+pub struct Probe {
+    pub sync_ns: u64,
+    pub write_through_ns: Option<u64>,
+    pub took: std::time::Duration,
+}
+
+fn median(mut v: Vec<u64>) -> u64 {
+    v.sort_unstable();
+    v[v.len() / 2]
+}
+
+/// Times both flush methods on the preallocated segment's last block and
+/// returns whether write-through was faster. A platform without
+/// write-through keeps `sync_data`.
+fn probe_flush(file: &mut File, path: &Path, len: u64) -> io::Result<(bool, Probe)> {
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let zeros = [0u8; PROBE_BLOCK];
+    let at = len.saturating_sub(PROBE_BLOCK as u64);
+    let mut sync = Vec::with_capacity(PROBES);
+    for _ in 0..PROBES {
+        file.seek(SeekFrom::Start(at))?;
+        let t = Instant::now();
+        file.write_all(&zeros)?;
+        file.sync_data()?;
+        sync.push(t.elapsed().as_nanos() as u64);
+    }
+    let wt = match open_write_through(path) {
+        Ok(mut f) => {
+            let mut v = Vec::with_capacity(PROBES);
+            for _ in 0..PROBES {
+                f.seek(SeekFrom::Start(at))?;
+                let t = Instant::now();
+                f.write_all(&zeros)?;
+                v.push(t.elapsed().as_nanos() as u64);
+            }
+            Some(median(v))
+        }
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => None,
+        Err(e) => return Err(e),
+    };
+    file.seek(SeekFrom::Start(0))?;
+    let sync_ns = median(sync);
+    let probe = Probe {
+        sync_ns,
+        write_through_ns: wt,
+        took: t0.elapsed(),
+    };
+    Ok((wt.is_some_and(|w| w < sync_ns), probe))
 }
 
 fn open_write_through(path: &Path) -> io::Result<File> {
@@ -106,6 +169,8 @@ pub struct Log {
     shared: Arc<Shared>,
     flusher: Option<JoinHandle<()>>,
     checksum: bool,
+    write_through: bool,
+    probe: Option<Probe>,
 }
 
 pub fn encode(out: &mut Vec<u8>, id: u64, payload: &[u8], checksum: bool) {
@@ -141,6 +206,19 @@ impl Log {
             file.sync_all()?;
             file.seek(SeekFrom::Start(0))?;
         }
+        let mut opts = opts;
+        let mut probe = None;
+        if opts.auto {
+            let len = opts.prealloc.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the flush probe needs a preallocated segment",
+                )
+            })?;
+            let (wt, p) = probe_flush(&mut file, path, len)?;
+            opts.write_through = wt;
+            probe = Some(p);
+        }
         if opts.write_through {
             if opts.prealloc.is_none() {
                 return Err(io::Error::new(
@@ -172,6 +250,8 @@ impl Log {
             shared,
             flusher: Some(flusher),
             checksum: opts.checksum,
+            write_through: opts.write_through,
+            probe,
         })
     }
 
@@ -195,6 +275,12 @@ impl Log {
             s = self.shared.done.wait(s).unwrap_or_else(|e| e.into_inner());
         }
         Ok(())
+    }
+
+    /// Whether the segment was opened write-through (set, or chosen by the
+    /// probe), and what the probe measured.
+    pub fn method(&self) -> (bool, Option<Probe>) {
+        (self.write_through, self.probe)
     }
 
     pub fn flushes(&self) -> u64 {
@@ -301,6 +387,8 @@ pub struct P01 {
     pub submits: u64,
     pub per_second: f64,
     pub flushes: u64,
+    pub write_through: bool,
+    pub probe: Option<Probe>,
 }
 
 /// P-01's shape: `target` durable submits of 64-byte payloads from
@@ -350,6 +438,7 @@ pub fn p01(
     });
     let secs = t0.elapsed().as_secs_f64();
     let flushes = log.flushes();
+    let (write_through, probe) = log.method();
     drop(log);
     let mut h = crate::stats::histogram();
     let mut n = 0u64;
@@ -372,6 +461,8 @@ pub fn p01(
         submits: n,
         per_second: n as f64 / secs,
         flushes,
+        write_through,
+        probe,
     })
 }
 
@@ -412,6 +503,7 @@ mod tests {
                     prealloc,
                     checksum: true,
                     write_through: false,
+                    auto: false,
                 },
                 4,
                 500,
@@ -429,12 +521,26 @@ mod tests {
                 prealloc: Some(1 << 20),
                 checksum: true,
                 write_through: true,
+                auto: false,
             };
             run(&p, opts, 4, 200);
             let mut ids = recover(&p, true).unwrap().ids;
             ids.sort_unstable();
             assert_eq!(ids, (0..800).collect::<Vec<_>>());
         }
+        // The probe picks a method, and the segment still recovers whole
+        // (the probe's zero block reads as the end of the log).
+        let p = d.join("auto.seg");
+        let opts = Options {
+            prealloc: Some(1 << 20),
+            checksum: true,
+            write_through: false,
+            auto: true,
+        };
+        run(&p, opts, 4, 200);
+        let r = recover(&p, true).unwrap();
+        assert!(!r.damaged);
+        assert_eq!(r.ids.len(), 800);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -448,6 +554,7 @@ mod tests {
                 prealloc: None,
                 checksum: true,
                 write_through: false,
+                auto: false,
             },
             1,
             100,
