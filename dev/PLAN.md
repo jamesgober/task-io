@@ -532,7 +532,7 @@ These are James's calls. Each is written so it can be answered with one line.
 
 | Id | Question | Recommendation |
 |---|---|---|
-| O-1 | The general-purpose executor moved out of task-io: name it, and when to start it? The design is kept for it. | `cycle-exec`, as already planned; start when a database's executor or LexerSketch needs it |
+| O-1 | The general-purpose executor moved out of task-io: name it, and when to start it? The design is kept for it. | `cycle-exec`, as already planned; start when a database's executor or the toolchain needs it |
 | O-2 | Publish `0.1.0` to crates.io now to claim the `task-io` name? | yes; the name is free today and the scaffold builds clean |
 | O-3 | ~~REPS "MUST use tokio"~~ Answered 2026-10-14: the rule does not apply to task-io (D-016). | |
 | O-4 | If, after every experiment, one gated benchmark cannot reach the 1.20 factor, the release stays blocked. Confirm that only you can waive a single benchmark, in writing in section 14. | yes, keep the block |
